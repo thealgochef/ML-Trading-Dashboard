@@ -32,7 +32,7 @@ if str(_SRC_DIR) not in sys.path:
 
 from alpha_lab.dashboard.config.settings import DashboardSettings
 from alpha_lab.dashboard.engine.feature_computer import FeatureComputer
-from alpha_lab.dashboard.engine.level_engine import LevelEngine
+from alpha_lab.dashboard.engine.level_engine import LevelEngine, _cme_day_start_utc
 from alpha_lab.dashboard.engine.models import ObservationStatus
 from alpha_lab.dashboard.engine.observation_manager import ObservationManager
 from alpha_lab.dashboard.engine.touch_detector import TouchDetector
@@ -444,7 +444,9 @@ def run_one_strategy(
         trading_date = date.fromisoformat(date_str)
 
         level_engine.reset_daily()
-        level_engine.compute_levels(trading_date)
+        # Compute levels at day start (6 PM ET prior day) — no lookahead
+        day_start_utc = _cme_day_start_utc(trading_date)
+        level_engine.compute_levels(trading_date, current_time=day_start_utc)
 
         if client._preloading:
             return

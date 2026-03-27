@@ -14,7 +14,7 @@ Session boundaries (Eastern Time):
 
 from __future__ import annotations
 
-import uuid
+import hashlib
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -39,6 +39,41 @@ _NY_RTH_END = time(16, 15)
 
 # Zone merging threshold (NQ points)
 PROXIMITY_THRESHOLD = Decimal("3.0")
+
+
+def _cme_day_start_utc(trading_date: date) -> datetime:
+    """Compute the UTC timestamp for the start of a CME trading day.
+
+    CME day boundary is 6 PM ET on the prior calendar day.
+    For trading_date 2025-06-09 (June 9), returns 2025-06-08 18:00 ET in UTC.
+    """
+    prior_cal_day = trading_date - timedelta(days=1)
+    day_start_et = datetime(
+        prior_cal_day.year, prior_cal_day.month, prior_cal_day.day,
+        18, 0, tzinfo=ET,
+    )
+    return day_start_et.astimezone(UTC)
+
+
+def _zone_identity(levels: list[KeyLevel]) -> str:
+    """Compute deterministic zone identity from constituent levels.
+
+    Uses sorted prices to create a canonical identifier. Zones with the same
+    constituent prices (regardless of level types) get the same identity,
+    allowing touch state to be preserved across rebuilds.
+
+    Args:
+        levels: List of KeyLevel objects in the zone
+
+    Returns:
+        8-character hex string (SHA256 hash of sorted prices)
+    """
+    # Sort by price to ensure consistent ordering
+    prices = sorted(lv.price for lv in levels)
+    # Create canonical string: "20300.00|20300.50|20301.25"
+    price_str = "|".join(f"{p:.2f}" for p in prices)
+    # Hash for shorter ID (8 chars instead of full hash)
+    return hashlib.sha256(price_str.encode()).hexdigest()[:8]
 
 
 class LevelEngine:
@@ -261,10 +296,19 @@ class LevelEngine:
             self._zones = []
             return
 
-        # Preserve existing touch state
-        old_touch_state: dict[str, tuple[bool, datetime | None]] = {}
+        # Preserve touch state by tracking which INDIVIDUAL LEVELS were in touched zones
+        # A zone is touched if ANY constituent level was part of a touched zone
+        touched_level_prices: set[Decimal] = set()
+        touched_at_map: dict[Decimal, datetime] = {}
+
         for z in self._zones:
-            old_touch_state[z.zone_id] = (z.is_touched, z.touched_at)
+            if z.is_touched:
+                # Record all level prices that were in this touched zone
+                for lv in z.levels:
+                    touched_level_prices.add(lv.price)
+                    # Use earliest touch time if multiple (though typically only one zone per price)
+                    if lv.price not in touched_at_map or (z.touched_at and z.touched_at < touched_at_map[lv.price]):
+                        touched_at_map[lv.price] = z.touched_at
 
         # Sort by price
         sorted_levels = sorted(all_levels, key=lambda lv: lv.price)
@@ -286,7 +330,9 @@ class LevelEngine:
             sides = {lv.side for lv in group}
             zone_side = sides.pop() if len(sides) == 1 else LevelSide.HIGH
 
-            zone_id = str(uuid.uuid4())[:8]
+            # Compute deterministic zone identity from constituent prices
+            identity = _zone_identity(group)
+            zone_id = identity  # Use identity as zone_id
 
             # Assign zone_id to constituent levels
             for level in group:
@@ -298,5 +344,13 @@ class LevelEngine:
                 levels=group,
                 side=zone_side,
             )
+
+            # Check if ANY constituent level was in a touched zone
+            # If yes, this zone inherits the touched state (conservative approach)
+            for lv in group:
+                if lv.price in touched_level_prices:
+                    zone.is_touched = True
+                    zone.touched_at = touched_at_map.get(lv.price)
+                    break  # One touched level is enough
 
             self._zones.append(zone)

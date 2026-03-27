@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from alpha_lab.dashboard.api.websocket import WebSocketManager
 from alpha_lab.dashboard.config.settings import DashboardSettings
 from alpha_lab.dashboard.engine.feature_computer import FeatureComputer
-from alpha_lab.dashboard.engine.level_engine import LevelEngine
+from alpha_lab.dashboard.engine.level_engine import LevelEngine, _cme_day_start_utc
 from alpha_lab.dashboard.engine.models import ObservationStatus
 from alpha_lab.dashboard.engine.observation_manager import ObservationManager
 from alpha_lab.dashboard.engine.touch_detector import TouchDetector
@@ -738,7 +738,9 @@ def _wire_pipeline_callbacks(
 
             # Always reset and recompute levels (needed during preload)
             level_engine.reset_daily()
-            level_engine.compute_levels(trading_date)
+            # Compute levels at day start (6 PM ET prior day) — no lookahead
+            day_start_utc = _cme_day_start_utc(trading_date)
+            level_engine.compute_levels(trading_date, current_time=day_start_utc)
 
             if replay_client._preloading:
                 return  # Skip full reset during preload

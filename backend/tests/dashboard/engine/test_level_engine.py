@@ -16,7 +16,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
-from alpha_lab.dashboard.engine.level_engine import LevelEngine
+from alpha_lab.dashboard.engine.level_engine import LevelEngine, _cme_day_start_utc
 from alpha_lab.dashboard.engine.models import (
     LevelSide,
     LevelType,
@@ -337,3 +337,112 @@ def test_level_persistence():
 
     # Verify all levels are stored internally
     assert len(engine.all_levels) == 6
+
+
+def test_replay_day_boundary_no_lookahead():
+    """At replay day boundary (6 PM ET), only PDH/PDL available, not future sessions.
+
+    This test verifies the lookahead fix: when compute_levels() is called with
+    current_time=<day_start>, only completed sessions are returned:
+    - 6 PM ET (day start): Only PDH/PDL (prior day RTH complete)
+    - 1 AM ET (Asia close): PDH/PDL + Asia
+    - 8 AM ET (London close): PDH/PDL + Asia + London
+    """
+    from zoneinfo import ZoneInfo
+    ET = ZoneInfo("America/New_York")
+
+    buf = PriceBuffer()
+    _populate_buffer_with_sessions(buf)
+    engine = LevelEngine(buf)
+
+    trading_date = date(2026, 3, 2)
+
+    # Test 1: Day boundary (6 PM ET prior day = 23:00 UTC 2026-03-01)
+    # Should return only PDH/PDL (prior day RTH is complete)
+    day_start_utc = _cme_day_start_utc(trading_date)
+    levels_at_day_start = engine.compute_levels(trading_date, current_time=day_start_utc)
+
+    pdh_pdl = [lv for lv in levels_at_day_start if lv.level_type in (LevelType.PDH, LevelType.PDL)]
+    asia_levels = [lv for lv in levels_at_day_start if lv.level_type in (LevelType.ASIA_HIGH, LevelType.ASIA_LOW)]
+    london_levels = [lv for lv in levels_at_day_start if lv.level_type in (LevelType.LONDON_HIGH, LevelType.LONDON_LOW)]
+
+    assert len(pdh_pdl) == 2, "PDH/PDL should be available at day start"
+    assert len(asia_levels) == 0, "Asia levels should NOT be available at day start (6 PM ET)"
+    assert len(london_levels) == 0, "London levels should NOT be available at day start"
+
+    # Test 2: After Asia closes (1 AM ET = 6:00 UTC 2026-03-02)
+    asia_close = datetime(2026, 3, 2, 1, 0, tzinfo=ET).astimezone(UTC)
+    levels_after_asia = engine.compute_levels(trading_date, current_time=asia_close)
+
+    pdh_pdl_2 = [lv for lv in levels_after_asia if lv.level_type in (LevelType.PDH, LevelType.PDL)]
+    asia_levels_2 = [lv for lv in levels_after_asia if lv.level_type in (LevelType.ASIA_HIGH, LevelType.ASIA_LOW)]
+    london_levels_2 = [lv for lv in levels_after_asia if lv.level_type in (LevelType.LONDON_HIGH, LevelType.LONDON_LOW)]
+
+    assert len(pdh_pdl_2) == 2, "PDH/PDL should still be available"
+    assert len(asia_levels_2) == 2, "Asia levels should NOW be available (after Asia close)"
+    assert len(london_levels_2) == 0, "London levels should NOT be available yet"
+
+    # Test 3: After London closes (8 AM ET = 13:00 UTC 2026-03-02)
+    london_close = datetime(2026, 3, 2, 8, 0, tzinfo=ET).astimezone(UTC)
+    levels_after_london = engine.compute_levels(trading_date, current_time=london_close)
+
+    pdh_pdl_3 = [lv for lv in levels_after_london if lv.level_type in (LevelType.PDH, LevelType.PDL)]
+    asia_levels_3 = [lv for lv in levels_after_london if lv.level_type in (LevelType.ASIA_HIGH, LevelType.ASIA_LOW)]
+    london_levels_3 = [lv for lv in levels_after_london if lv.level_type in (LevelType.LONDON_HIGH, LevelType.LONDON_LOW)]
+
+    assert len(pdh_pdl_3) == 2, "PDH/PDL should still be available"
+    assert len(asia_levels_3) == 2, "Asia levels should still be available"
+    assert len(london_levels_3) == 2, "London levels should NOW be available (after London close)"
+
+
+def test_touched_zones_survive_rebuild():
+    """Touched zones remain spent after _rebuild_zones() is called.
+
+    This test verifies the zone resurrection fix: when a zone is marked as
+    touched, then _rebuild_zones() is triggered (e.g., by adding a manual level),
+    the touched state must be preserved. Zones with the same constituent prices
+    maintain their touch state across rebuilds.
+    """
+    buf = PriceBuffer()
+    buf.add_trade(_trade(datetime(2026, 3, 2, 14, 30, tzinfo=UTC), 20100.00))
+    engine = LevelEngine(buf)
+
+    # Create two manual levels that will form a zone
+    engine.add_manual_level(Decimal("20050.00"), date(2026, 3, 2))
+    engine.add_manual_level(Decimal("20051.00"), date(2026, 3, 2))
+
+    # These should merge into a single zone (within 3 pts)
+    zones = engine.get_active_zones()
+    assert len(zones) == 1, "Two close levels should merge into one zone"
+
+    original_zone = zones[0]
+    original_zone_id = original_zone.zone_id
+
+    # Mark the zone as touched
+    touch_time = datetime(2026, 3, 2, 15, 0, tzinfo=UTC)
+    engine.mark_zone_touched(original_zone_id, touch_time)
+
+    # Verify zone is touched
+    assert original_zone.is_touched is True
+    assert original_zone.touched_at == touch_time
+    assert len(engine.get_active_zones()) == 0, "Touched zone should not be in active zones"
+
+    # Add a third manual level that merges with the touched zone
+    # This triggers _rebuild_zones()
+    engine.add_manual_level(Decimal("20052.00"), date(2026, 3, 2))
+
+    # All three levels should merge into a single zone (all within 3 pts)
+    all_zones = engine.all_zones
+    merged_zones = [z for z in all_zones if 20049 < float(z.representative_price) < 20053]
+    assert len(merged_zones) == 1, "All three levels should merge into one zone"
+
+    merged_zone = merged_zones[0]
+
+    # CRITICAL: The merged zone should STILL be touched (touch state preserved)
+    assert merged_zone.is_touched is True, "Merged zone must preserve touched state"
+    assert merged_zone.touched_at == touch_time, "Touch timestamp must be preserved"
+
+    # Verify the merged zone does NOT appear in active zones
+    active_zones = engine.get_active_zones()
+    assert merged_zone not in active_zones, "Touched merged zone must NOT be active"
+    assert len(active_zones) == 0, "No zones should be active (merged zone is touched)"
