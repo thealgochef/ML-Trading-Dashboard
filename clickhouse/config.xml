@@ -1,0 +1,17 @@
+<clickhouse>
+    <!-- Memory limits — sized for r6i.large (16 GB RAM, ~10 GB for CH) -->
+    <profiles>
+        <default>
+            <max_memory_usage>10000000000</max_memory_usage>
+        </default>
+    </profiles>
+
+    <!-- Logging -->
+    <logger>
+        <level>warning</level>
+        <console>1</console>
+    </logger>
+
+    <!-- Listen on Docker network -->
+    <listen_host>0.0.0.0</listen_host>
+</clickhouse>
