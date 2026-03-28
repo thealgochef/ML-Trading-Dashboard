@@ -45,6 +45,10 @@ class ObservationManager:
         self._fc = feature_computer
         self._active: ObservationWindow | None = None
         self._callbacks: list[Callable[[ObservationWindow], None]] = []
+        # Additive instrumentation for observation-censoring analytics
+        self._accepted_touches: int = 0
+        self._rejected_touches: int = 0
+        self._rejection_records: list[dict[str, str]] = []
 
     @property
     def active_observation(self) -> ObservationWindow | None:
@@ -60,6 +64,16 @@ class ObservationManager:
                 "Observation rejected: already active (event=%s), ignoring new touch event=%s",
                 self._active.event.event_id[:8], event.event_id[:8],
             )
+            self._rejected_touches += 1
+            level_type = None
+            if event.level_zone.levels:
+                level_type = event.level_zone.levels[0].level_type.value
+            self._rejection_records.append({
+                "reason": "already_active",
+                "session": event.session,
+                "level_type": level_type or "unknown",
+                "direction": event.trade_direction.value,
+            })
             return None
 
         window = ObservationWindow(
@@ -69,6 +83,7 @@ class ObservationManager:
             status=ObservationStatus.ACTIVE,
         )
         self._active = window
+        self._accepted_touches += 1
         logger.info(
             "Observation started: event=%s, direction=%s, level=%.2f, ends=%s",
             event.event_id[:8], event.trade_direction.value,
@@ -128,6 +143,43 @@ class ObservationManager:
     ) -> None:
         """Register a callback for when an observation completes or is discarded."""
         self._callbacks.append(callback)
+
+
+    def get_censoring_stats(self) -> dict:
+        """Return additive observation censoring metrics for analytics."""
+        grouped: dict[tuple[str, str, str, str], int] = {}
+        for rec in self._rejection_records:
+            key = (
+                rec.get("reason", "unknown"),
+                rec.get("session", "unknown"),
+                rec.get("level_type", "unknown"),
+                rec.get("direction", "unknown"),
+            )
+            grouped[key] = grouped.get(key, 0) + 1
+
+        by_group = [
+            {
+                "reason": k[0],
+                "session": k[1],
+                "level_type": k[2],
+                "direction": k[3],
+                "count": v,
+            }
+            for k, v in sorted(grouped.items())
+        ]
+
+        total = self._accepted_touches + self._rejected_touches
+        rejection_rate = self._rejected_touches / total if total else 0.0
+
+        return {
+            "summary": {
+                "accepted_touches": self._accepted_touches,
+                "rejected_touches": self._rejected_touches,
+                "rejection_rate": rejection_rate,
+            },
+            "by_group": by_group,
+            "records": list(self._rejection_records),
+        }
 
     def _complete_window(self) -> None:
         """Complete the active window: compute features and fire callbacks."""
