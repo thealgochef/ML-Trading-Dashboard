@@ -37,3 +37,6 @@ frontend/dist/
 
 # Misc
 test.json
+
+# Vite cache artifacts
+frontend/.vite/
