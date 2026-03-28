@@ -108,6 +108,64 @@ STRATEGIES = [
 ]
 
 
+def _init_balance_tracking_record(balance: float = 50_000.0) -> dict[str, float]:
+    """Create one per-account tracking record.
+
+    Keeps two separate concepts:
+    - Global run-wide extrema: peak/trough
+    - Payout-adjusted DD reporting: dd_hwm/dd_max
+    """
+    return {
+        "peak": balance,      # full-run highest balance
+        "trough": balance,    # full-run lowest balance
+        "dd_hwm": balance,    # DD reporting baseline (reset after payout)
+        "dd_max": 0.0,        # max drop from dd_hwm
+    }
+
+
+def _update_balance_tracking(
+    tracking: dict[str, dict[str, float]],
+    account_id: str,
+    balance: float,
+) -> None:
+    """Update global extrema + payout-adjusted DD metrics for one account."""
+    if account_id not in tracking:
+        tracking[account_id] = _init_balance_tracking_record(balance)
+
+    rec = tracking[account_id]
+
+    # Global full-run extrema (never reset on payout)
+    if balance > rec["peak"]:
+        rec["peak"] = balance
+    if balance < rec["trough"]:
+        rec["trough"] = balance
+
+    # Payout-adjusted DD reporting baseline
+    if balance > rec["dd_hwm"]:
+        rec["dd_hwm"] = balance
+    current_dd = rec["dd_hwm"] - balance
+    if current_dd > rec["dd_max"]:
+        rec["dd_max"] = current_dd
+
+
+def _reset_dd_baseline_after_payout(
+    tracking: dict[str, dict[str, float]],
+    account_id: str,
+    post_payout_balance: float,
+) -> None:
+    """Reset only DD baseline after payout withdrawal.
+
+    Payouts are withdrawals, not trading losses. We reset dd_hwm to the new
+    balance so payout cash movement is excluded from DD reporting.
+    Global peak/trough and historical dd_max are preserved.
+    """
+    if account_id not in tracking:
+        tracking[account_id] = _init_balance_tracking_record(post_payout_balance)
+        return
+
+    tracking[account_id]["dd_hwm"] = post_payout_balance
+
+
 def _auto_load_model(model_manager: ModelManager, model_dir: Path) -> None:
     """Load the CatBoost model."""
     cbm_files = sorted(model_dir.glob("*.cbm"))
@@ -224,32 +282,16 @@ def run_one_strategy(
     }
 
     def _reset_dd_tracking_after_payout(account_id: str) -> None:
-        """Reset DD tracking baseline after a payout withdrawal.
-
-        Payouts are cash withdrawals, not trading losses. If we keep the old
-        HWM baseline across a withdrawal, reported max_dd can be overstated
-        relative to Apex trailing-DD risk. After a payout, reset HWM/trough
-        to the new balance so subsequent DD reflects trading drawdown only.
-        """
+        """Reset only payout-adjusted DD baseline after payout."""
         acct = account_manager.get_account(account_id)
         if acct is None:
             return
 
-        bal = float(acct.balance)
-        bt = state["balance_tracking"]
-        if account_id not in bt:
-            bt[account_id] = {
-                "peak": bal,
-                "trough": bal,
-                "hwm": bal,
-                "max_dd": 0.0,
-            }
-            return
-
-        bt[account_id]["hwm"] = bal
-        bt[account_id]["trough"] = bal
-        if bal > bt[account_id]["peak"]:
-            bt[account_id]["peak"] = bal
+        _reset_dd_baseline_after_payout(
+            tracking=state["balance_tracking"],
+            account_id=account_id,
+            post_payout_balance=float(acct.balance),
+        )
 
     # ── Wire callbacks ────────────────────────────────────────────
 
@@ -338,24 +380,16 @@ def run_one_strategy(
                 "timestamp": trade_data["exit_time"],
             })
 
-            # Running balance tracking
+            # Running balance tracking:
+            # - peak/trough are full-run extrema
+            # - dd_hwm/dd_max are payout-adjusted DD reporting fields
             bal = float(acct.balance)
             aid = acct.account_id
             bt = state["balance_tracking"]
-            if aid not in bt:
-                bt[aid] = {"peak": 50_000.0, "trough": 50_000.0, "hwm": 50_000.0, "max_dd": 0.0}
-            if bal > bt[aid]["peak"]:
-                bt[aid]["peak"] = bal
-            if bal < bt[aid]["trough"]:
-                bt[aid]["trough"] = bal
-            if bal > bt[aid]["hwm"]:
-                bt[aid]["hwm"] = bal
-            current_dd = bt[aid]["hwm"] - bal
-            if current_dd > bt[aid]["max_dd"]:
-                bt[aid]["max_dd"] = current_dd
+            _update_balance_tracking(bt, aid, bal)
             if trade.exit_reason == "blown":
-                if _TRAILING_DD_LIMIT > bt[aid]["max_dd"]:
-                    bt[aid]["max_dd"] = _TRAILING_DD_LIMIT
+                if _TRAILING_DD_LIMIT > bt[aid]["dd_max"]:
+                    bt[aid]["dd_max"] = _TRAILING_DD_LIMIT
 
         # Forward to RegimeWaveExecutor
         if regime_executor is not None:
@@ -588,7 +622,7 @@ def run_one_strategy(
     peak_balance = max(all_peaks) if all_peaks else 50_000.0
     trough_balance = min(all_troughs) if all_troughs else 50_000.0
     max_trailing_dd = max(
-        (bt[a.account_id]["max_dd"] for a in all_accounts if a.account_id in bt),
+        (bt[a.account_id]["dd_max"] for a in all_accounts if a.account_id in bt),
         default=0.0,
     )
 
