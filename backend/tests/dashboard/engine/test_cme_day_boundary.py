@@ -369,3 +369,37 @@ def test_unresolved_predictions_at_boundary():
     handler2("post_market", "asia", asia_ts2)
 
     outcome_tracker.on_session_end.assert_not_called()
+
+
+def test_end_day_runs_without_economic_tracker():
+    """acct.end_day() fires even when economic_tracker is None (live mode).
+
+    In live mode, state.economic_tracker is None. The end_day() call must
+    still run unconditionally to record qualifying days and daily profits.
+    Only economic_tracker.on_day_end() should be skipped.
+    """
+    buf = PriceBuffer()
+    engine = LevelEngine(buf)
+    acct_mgr = MockAccountManager()
+    acct = acct_mgr.add_mock_account()
+
+    # No economic_tracker — simulates live mode
+    handler, state = _build_session_change_handler(
+        level_engine=engine,
+        account_manager=acct_mgr,
+        economic_tracker=None,
+        buffer=buf,
+    )
+
+    # Bootstrap
+    pm_ts = datetime(2026, 3, 2, 17, 0, tzinfo=ET).astimezone(UTC)
+    handler(None, "post_market", pm_ts)
+
+    # CME day boundary
+    asia_ts = datetime(2026, 3, 2, 18, 0, tzinfo=ET).astimezone(UTC)
+    handler("post_market", "asia", asia_ts)
+
+    # end_day() MUST still be called (records qualifying days)
+    acct.end_day.assert_called_once()
+    # start_new_day() MUST still be called (zeros daily PnL)
+    assert acct_mgr.start_new_day_calls == 1

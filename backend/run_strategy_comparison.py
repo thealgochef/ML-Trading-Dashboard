@@ -223,6 +223,34 @@ def run_one_strategy(
         "trading_days": 0,
     }
 
+    def _reset_dd_tracking_after_payout(account_id: str) -> None:
+        """Reset DD tracking baseline after a payout withdrawal.
+
+        Payouts are cash withdrawals, not trading losses. If we keep the old
+        HWM baseline across a withdrawal, reported max_dd can be overstated
+        relative to Apex trailing-DD risk. After a payout, reset HWM/trough
+        to the new balance so subsequent DD reflects trading drawdown only.
+        """
+        acct = account_manager.get_account(account_id)
+        if acct is None:
+            return
+
+        bal = float(acct.balance)
+        bt = state["balance_tracking"]
+        if account_id not in bt:
+            bt[account_id] = {
+                "peak": bal,
+                "trough": bal,
+                "hwm": bal,
+                "max_dd": 0.0,
+            }
+            return
+
+        bt[account_id]["hwm"] = bal
+        bt[account_id]["trough"] = bal
+        if bal > bt[account_id]["peak"]:
+            bt[account_id]["peak"] = bal
+
     # ── Wire callbacks ────────────────────────────────────────────
 
     pipeline.register_trade_handler(tick_bar_builder.on_trade)
@@ -385,6 +413,8 @@ def run_one_strategy(
                 regime_executor.end_day()
                 payouts = regime_executor.check_payouts()
                 state["total_payouts"].extend(payouts)
+                for payout_acct_id, _ in payouts:
+                    _reset_dd_tracking_after_payout(payout_acct_id)
             else:
                 for acct in account_manager.get_all_accounts():
                     acct.end_day()
@@ -398,6 +428,7 @@ def run_one_strategy(
                         continue
                     if acct.request_payout(amount):
                         state["total_payouts"].append((acct.account_id, amount))
+                        _reset_dd_tracking_after_payout(acct.account_id)
                         logger.info(
                             "[%s] Payout: account=%s, amount=$%.2f, payout_number=%d",
                             config.name, acct.account_id, float(amount),

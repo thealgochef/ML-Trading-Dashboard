@@ -719,6 +719,10 @@ def _wire_pipeline_callbacks(
     pipeline.register_backfill_callback(_on_backfill_complete)
 
     # ── Session change → recompute levels + CME day boundary ────
+    # NOTE: This callback fires in BOTH live and replay modes.
+    # Live mode previously had no daily reset mechanism at all.
+    # The post_market → asia transition at 6 PM ET is the correct
+    # trigger for end_day/start_new_day in both modes.
     _last_reset_trading_date: date | None = None
 
     def _on_session_change(old_session: str | None, new_session: str, timestamp) -> None:
@@ -756,16 +760,20 @@ def _wire_pipeline_callbacks(
                 outcome_tracker.on_session_end(timestamp)
 
             # STEP 1: End-of-day accounting (reads CLOSING day's state)
+            # end_day() runs unconditionally (live + replay) — records
+            # qualifying days and daily profits before start_new_day
+            # zeros them. economic_tracker.on_day_end() only fires in
+            # replay mode (live mode has economic_tracker=None).
+            acct_snapshots = []
+            for acct in state.account_manager.get_all_accounts():
+                acct.end_day()
+                acct_snapshots.append({
+                    "account_id": acct.account_id,
+                    "daily_pnl": float(acct.daily_pnl),
+                    "balance": float(acct.balance),
+                    "status": acct.status.value,
+                })
             if state.economic_tracker is not None:
-                acct_snapshots = []
-                for acct in state.account_manager.get_all_accounts():
-                    acct.end_day()
-                    acct_snapshots.append({
-                        "account_id": acct.account_id,
-                        "daily_pnl": float(acct.daily_pnl),
-                        "balance": float(acct.balance),
-                        "status": acct.status.value,
-                    })
                 state.economic_tracker.on_day_end(
                     trading_date.isoformat(), acct_snapshots,
                 )
@@ -787,7 +795,7 @@ def _wire_pipeline_callbacks(
             # STEP 5: Broadcast
             _broadcast_levels()
             _schedule_broadcast({
-                "type": "replay_day_boundary",
+                "type": "day_boundary",
                 "data": {"date": trading_date.isoformat()},
             })
             return
