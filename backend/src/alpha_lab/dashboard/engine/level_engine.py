@@ -299,15 +299,18 @@ class LevelEngine:
         # Preserve touch state by tracking which INDIVIDUAL LEVELS were in touched zones
         # A zone is touched if ANY constituent level was part of a touched zone
         touched_level_prices: set[Decimal] = set()
-        touched_at_map: dict[Decimal, datetime] = {}
+        touched_at_map: dict[Decimal, datetime | None] = {}
 
         for z in self._zones:
             if z.is_touched:
                 # Record all level prices that were in this touched zone
                 for lv in z.levels:
                     touched_level_prices.add(lv.price)
-                    # Use earliest touch time if multiple (though typically only one zone per price)
-                    if lv.price not in touched_at_map or (z.touched_at and z.touched_at < touched_at_map[lv.price]):
+                    # Keep earliest non-None touch time; prefer real timestamp over None
+                    if lv.price not in touched_at_map or (
+                        z.touched_at is not None
+                        and (touched_at_map[lv.price] is None or z.touched_at < touched_at_map[lv.price])
+                    ):
                         touched_at_map[lv.price] = z.touched_at
 
         # Sort by price

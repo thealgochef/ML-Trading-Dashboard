@@ -395,6 +395,41 @@ def test_replay_day_boundary_no_lookahead():
     assert len(london_levels_3) == 2, "London levels should NOW be available (after London close)"
 
 
+def test_touched_at_map_handles_none():
+    """Zone with touched_at=None doesn't crash on rebuild.
+
+    When a zone's touched_at is None (e.g., marked touched programmatically
+    without a timestamp), _rebuild_zones() must handle the None comparison
+    in touched_at_map without raising a TypeError.
+    """
+    buf = PriceBuffer()
+    buf.add_trade(_trade(datetime(2026, 3, 2, 14, 30, tzinfo=UTC), 20100.00))
+    engine = LevelEngine(buf)
+
+    # Create two levels that form a zone
+    engine.add_manual_level(Decimal("20050.00"), date(2026, 3, 2))
+    engine.add_manual_level(Decimal("20051.00"), date(2026, 3, 2))
+
+    zones = engine.get_active_zones()
+    assert len(zones) == 1
+
+    # Mark zone touched with explicit None timestamp
+    zone = zones[0]
+    zone.is_touched = True
+    zone.touched_at = None  # Explicitly None
+
+    # Trigger rebuild — this should NOT crash with TypeError
+    # on the comparison `z.touched_at < touched_at_map[lv.price]`
+    engine.add_manual_level(Decimal("20052.00"), date(2026, 3, 2))
+
+    # Verify the zone survived the rebuild and is still touched
+    all_zones = engine.all_zones
+    merged = [z for z in all_zones if 20049 < float(z.representative_price) < 20053]
+    assert len(merged) == 1
+    assert merged[0].is_touched is True
+    assert merged[0].touched_at is None  # None preserved
+
+
 def test_touched_zones_survive_rebuild():
     """Touched zones remain spent after _rebuild_zones() is called.
 

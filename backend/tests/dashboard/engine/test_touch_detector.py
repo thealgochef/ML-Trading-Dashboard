@@ -277,3 +277,112 @@ def test_no_active_zones_no_detection():
     event = detector.on_trade(_trade(ts + timedelta(minutes=1), 20200.00))
     assert event is None
     assert detector.active_zone_count == 0
+
+
+# ── CME Day Boundary Classification Tests ────────────────────────
+
+
+def test_cme_day_boundary_session_change_at_6pm_et():
+    """Session changes from post_market → asia at exactly 6 PM ET.
+
+    5:59 PM ET = post_market, 6:00 PM ET = asia. The TouchDetector fires
+    a session_change callback at this transition, which is the true CME
+    day boundary (not UTC midnight file transitions).
+    """
+    from alpha_lab.dashboard.engine.touch_detector import _classify_session
+    from zoneinfo import ZoneInfo
+
+    ET = ZoneInfo("America/New_York")
+
+    # 5:59 PM ET → post_market (2026-03-02 during EST, UTC-5)
+    ts_559pm = datetime(2026, 3, 2, 17, 59, tzinfo=ET).astimezone(UTC)
+    assert _classify_session(ts_559pm) == "post_market"
+
+    # 6:00 PM ET → asia (CME day boundary)
+    ts_600pm = datetime(2026, 3, 2, 18, 0, tzinfo=ET).astimezone(UTC)
+    assert _classify_session(ts_600pm) == "asia"
+
+    # Verify TouchDetector fires session_change for this transition
+    zone = _make_zone(20150.00, LevelSide.HIGH)
+    engine = _make_engine_with_zones([zone])
+    detector = TouchDetector(engine)
+
+    transitions: list[tuple[str | None, str]] = []
+    detector.on_session_change(
+        lambda old, new, ts: transitions.append((old, new))
+    )
+
+    # Feed a post_market tick then an asia tick
+    detector.on_trade(_trade(ts_559pm, 20100.00))
+    detector.on_trade(_trade(ts_600pm, 20100.00))
+
+    assert len(transitions) == 2  # None→post_market, post_market→asia
+    assert transitions[0] == (None, "post_market")
+    assert transitions[1] == ("post_market", "asia")
+
+
+def test_no_session_change_at_utc_midnight():
+    """UTC midnight does NOT trigger a session change if session stays the same.
+
+    At UTC midnight during EST (UTC-5), ET time is 7 PM (19:00) — still
+    in the 'asia' session (18:00–01:00 ET). No session change should fire.
+    """
+    from alpha_lab.dashboard.engine.touch_detector import _classify_session
+
+    # 2026-03-01 23:59 UTC = 6:59 PM ET → asia
+    ts_before_midnight = datetime(2026, 3, 1, 23, 59, tzinfo=UTC)
+    assert _classify_session(ts_before_midnight) == "asia"
+
+    # 2026-03-02 00:01 UTC = 7:01 PM ET → still asia
+    ts_after_midnight = datetime(2026, 3, 2, 0, 1, tzinfo=UTC)
+    assert _classify_session(ts_after_midnight) == "asia"
+
+    # Verify no session change callback fires
+    zone = _make_zone(20150.00, LevelSide.HIGH)
+    engine = _make_engine_with_zones([zone])
+    detector = TouchDetector(engine)
+
+    transitions: list[tuple[str | None, str]] = []
+    detector.on_session_change(
+        lambda old, new, ts: transitions.append((old, new))
+    )
+
+    detector.on_trade(_trade(ts_before_midnight, 20100.00))
+    detector.on_trade(_trade(ts_after_midnight, 20100.00))
+
+    # Only the initial None → asia transition, no second transition
+    assert len(transitions) == 1
+    assert transitions[0] == (None, "asia")
+
+
+def test_friday_to_sunday_boundary():
+    """post_market → asia fires correctly across a weekend gap.
+
+    Friday's last tick is in post_market (after 4:15 PM ET).
+    Sunday's first tick at 6 PM ET starts a new asia session.
+    The transition post_market → asia fires correctly despite the gap.
+    """
+    from zoneinfo import ZoneInfo
+
+    ET = ZoneInfo("America/New_York")
+
+    zone = _make_zone(20150.00, LevelSide.HIGH)
+    engine = _make_engine_with_zones([zone])
+    detector = TouchDetector(engine)
+
+    transitions: list[tuple[str | None, str]] = []
+    detector.on_session_change(
+        lambda old, new, ts: transitions.append((old, new))
+    )
+
+    # Friday 4:30 PM ET → post_market
+    friday_tick = datetime(2026, 3, 6, 16, 30, tzinfo=ET).astimezone(UTC)
+    detector.on_trade(_trade(friday_tick, 20100.00))
+
+    # Sunday 6:00 PM ET → asia (CME week opens)
+    sunday_tick = datetime(2026, 3, 8, 18, 0, tzinfo=ET).astimezone(UTC)
+    detector.on_trade(_trade(sunday_tick, 20100.00))
+
+    assert len(transitions) == 2
+    assert transitions[0] == (None, "post_market")
+    assert transitions[1] == ("post_market", "asia")

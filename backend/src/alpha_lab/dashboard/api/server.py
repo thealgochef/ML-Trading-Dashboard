@@ -718,9 +718,81 @@ def _wire_pipeline_callbacks(
 
     pipeline.register_backfill_callback(_on_backfill_complete)
 
-    # ── Session change → recompute levels ────────────────────────
+    # ── Session change → recompute levels + CME day boundary ────
+    _last_reset_trading_date: date | None = None
+
     def _on_session_change(old_session: str | None, new_session: str, timestamp) -> None:
+        nonlocal _last_reset_trading_date
         trading_date = _cme_trading_date(timestamp)
+
+        is_cme_day_boundary = (old_session == "post_market" and new_session == "asia")
+        is_bootstrap = (_last_reset_trading_date is None)
+
+        # ── Bootstrap: first visible session callback (any session) ──
+        # Initialize level state only. No end-of-day accounting —
+        # there's no prior day to close.
+        if is_bootstrap:
+            _last_reset_trading_date = trading_date
+            level_engine.reset_daily()
+            levels = level_engine.compute_levels(trading_date, current_time=timestamp)
+            logger.info(
+                "Bootstrap session %s: computed %d key levels (trading_date=%s)",
+                new_session, len(levels), trading_date,
+            )
+            _broadcast_levels()
+            return
+
+        # ── True CME day boundary: post_market → asia ──────────────
+        if is_cme_day_boundary and trading_date != _last_reset_trading_date:
+            _last_reset_trading_date = trading_date
+            logger.info(
+                "CME day boundary: %s -> %s (trading_date=%s)",
+                old_session, new_session, trading_date,
+            )
+
+            # STEP 0: Force-resolve any remaining open predictions
+            # (sparse ticks near close — 3:55 PM check may not have fired)
+            if not state.session_ended:
+                outcome_tracker.on_session_end(timestamp)
+
+            # STEP 1: End-of-day accounting (reads CLOSING day's state)
+            if state.economic_tracker is not None:
+                acct_snapshots = []
+                for acct in state.account_manager.get_all_accounts():
+                    acct.end_day()
+                    acct_snapshots.append({
+                        "account_id": acct.account_id,
+                        "daily_pnl": float(acct.daily_pnl),
+                        "balance": float(acct.balance),
+                        "status": acct.status.value,
+                    })
+                state.economic_tracker.on_day_end(
+                    trading_date.isoformat(), acct_snapshots,
+                )
+
+            # STEP 2: Reset accounts for new day
+            state.account_manager.start_new_day()
+
+            # STEP 3: Reset levels for new trading day
+            level_engine.reset_daily()
+            levels = level_engine.compute_levels(trading_date, current_time=timestamp)
+
+            # STEP 4: Clear pipeline state
+            pipeline._buffer.evict()
+            state.session_ended = False
+            # NOTE: Do NOT clear touch_detector._session_touches or
+            # _current_session — already handled by on_trade() before
+            # this callback fires.
+
+            # STEP 5: Broadcast
+            _broadcast_levels()
+            _schedule_broadcast({
+                "type": "replay_day_boundary",
+                "data": {"date": trading_date.isoformat()},
+            })
+            return
+
+        # ── Regular session transition — just recompute levels ─────
         levels = level_engine.compute_levels(trading_date, current_time=timestamp)
         logger.info(
             "Session %s -> %s: recomputed %d key levels (trading_date=%s)",
@@ -730,47 +802,18 @@ def _wire_pipeline_callbacks(
 
     touch_detector.on_session_change(_on_session_change)
 
-    # ── Replay: day boundary + preload handling ─────────────────
+    # ── Replay: file-loaded callback (preload-only level init) ──
     if replay_client is not None:
-        def _on_day_boundary(date_str: str) -> None:
+        def _on_file_loaded(date_str: str) -> None:
+            if not replay_client._preloading:
+                return  # Visible replay: day reset handled by session change
             from datetime import date as _date
             trading_date = _date.fromisoformat(date_str)
-
-            # Always reset and recompute levels (needed during preload)
             level_engine.reset_daily()
-            # Compute levels at day start (6 PM ET prior day) — no lookahead
             day_start_utc = _cme_day_start_utc(trading_date)
             level_engine.compute_levels(trading_date, current_time=day_start_utc)
 
-            if replay_client._preloading:
-                return  # Skip full reset during preload
-
-            # End-of-day: record daily P&L + qualifying days before reset
-            if state.economic_tracker is not None:
-                acct_snapshots = []
-                for acct in state.account_manager.get_all_accounts():
-                    acct.end_day()  # Record qualifying day status
-                    acct_snapshots.append({
-                        "account_id": acct.account_id,
-                        "daily_pnl": float(acct.daily_pnl),
-                        "balance": float(acct.balance),
-                        "status": acct.status.value,
-                    })
-                state.economic_tracker.on_day_end(date_str, acct_snapshots)
-
-            # Visible dates: full day boundary reset
-            state.account_manager.start_new_day()
-            pipeline._buffer.evict()
-            state.session_ended = False
-            touch_detector._session_touches.clear()
-            touch_detector._current_session = None
-            _broadcast_levels()
-            _schedule_broadcast({
-                "type": "replay_day_boundary",
-                "data": {"date": date_str},
-            })
-
-        replay_client.on_day_boundary(_on_day_boundary)
+        replay_client.on_file_loaded(_on_file_loaded)
 
 
 # ═══════════════════════════════════════════════════════════════════

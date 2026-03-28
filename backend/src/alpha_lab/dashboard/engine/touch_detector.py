@@ -82,15 +82,12 @@ class TouchDetector:
     def on_trade(self, trade: TradeUpdate) -> TouchEvent | None:
         """Process a trade. Returns a TouchEvent if this trade triggers
         a level touch, otherwise None."""
-        # Time cutoff: no new touches after 3:49 PM ET
-        ts_et = trade.timestamp.astimezone(ET)
-        if (ts_et.hour > _CUTOFF_HOUR or
-                (ts_et.hour == _CUTOFF_HOUR and ts_et.minute > _CUTOFF_MINUTE)):
-            return None
-
         session = _classify_session(trade.timestamp)
 
-        # Reset session-local touches when session changes
+        # Detect session changes BEFORE the time cutoff — session
+        # transitions (especially post_market → asia at 6 PM ET for
+        # CME day boundary) must always fire regardless of whether
+        # touch detection is active.
         if session != self._current_session:
             old_session = self._current_session
             logger.info(
@@ -101,12 +98,18 @@ class TouchDetector:
             self._session_touches.clear()
             self._current_session = session
 
-            # Notify listeners (e.g. level recomputation)
+            # Notify listeners (e.g. level recomputation, day reset)
             for cb in self._session_change_callbacks:
                 try:
                     cb(old_session, session, trade.timestamp)
                 except Exception:
                     logger.exception("Session change callback failed")
+
+        # Time cutoff: no new touches after 3:49 PM ET
+        ts_et = trade.timestamp.astimezone(ET)
+        if (ts_et.hour > _CUTOFF_HOUR or
+                (ts_et.hour == _CUTOFF_HOUR and ts_et.minute > _CUTOFF_MINUTE)):
+            return None
 
         for zone in self._engine.get_active_zones():
             # During non-RTH: skip if already touched in this session

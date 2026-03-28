@@ -60,7 +60,7 @@ class ReplayClient:
         self._trade_callbacks: list[Callable[[TradeUpdate], None]] = []
         self._bbo_callbacks: list[Callable[[BBOUpdate], None]] = []
         self._status_callbacks: list[Callable[[ConnectionStatus], None]] = []
-        self._day_boundary_callbacks: list[Callable[[str], None]] = []
+        self._file_loaded_callbacks: list[Callable[[str], None]] = []
 
         # Date range
         self._start_date = start_date
@@ -99,9 +99,9 @@ class ReplayClient:
     ) -> None:
         self._status_callbacks.append(callback)
 
-    def on_day_boundary(self, callback: Callable[[str], None]) -> None:
-        """Register callback fired before each day's ticks."""
-        self._day_boundary_callbacks.append(callback)
+    def on_file_loaded(self, callback: Callable[[str], None]) -> None:
+        """Register callback fired before each date's ticks are replayed."""
+        self._file_loaded_callbacks.append(callback)
 
     async def connect(self) -> None:
         """Discover available dates and compute preload/visible ranges."""
@@ -265,8 +265,8 @@ class ReplayClient:
         """Replay one day's ticks through callbacks."""
         self.current_date = date_str
 
-        # Fire day boundary callbacks
-        for cb in self._day_boundary_callbacks:
+        # Fire file-loaded callbacks (used for preload level init)
+        for cb in self._file_loaded_callbacks:
             cb(date_str)
 
         # Load data

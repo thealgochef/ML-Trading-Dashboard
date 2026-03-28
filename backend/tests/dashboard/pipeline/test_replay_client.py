@@ -192,14 +192,14 @@ async def test_preloads_prior_dates(data_dir: Path):
 
 
 @pytest.mark.asyncio
-async def test_day_boundary_callback_fires(data_dir: Path):
-    """on_day_boundary callback fires before each day's ticks."""
+async def test_file_loaded_callback_fires(data_dir: Path):
+    """on_file_loaded callback fires before each day's ticks."""
     client = ReplayClient(data_dir=data_dir, speed=1000.0)
     # Disable step mode and start playing so replay runs to completion
     client._step_mode = False
 
     boundaries: list[str] = []
-    client.on_day_boundary(boundaries.append)
+    client.on_file_loaded(boundaries.append)
 
     await client.connect()
     client.play()

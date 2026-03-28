@@ -390,8 +390,61 @@ def run_one_config(
             return (ts_et + timedelta(days=1)).date()
         return ts_et.date()
 
+    _last_reset_trading_date: date | None = None
+
     def _on_session_change(old_session, new_session, timestamp):
+        nonlocal _last_reset_trading_date
         trading_date = _cme_trading_date(timestamp)
+
+        is_cme_day_boundary = (old_session == "post_market" and new_session == "asia")
+        is_bootstrap = (_last_reset_trading_date is None)
+
+        # Bootstrap: first visible session callback — init levels only
+        if is_bootstrap:
+            _last_reset_trading_date = trading_date
+            level_engine.reset_daily()
+            level_engine.compute_levels(trading_date, current_time=timestamp)
+            return
+
+        # True CME day boundary: post_market → asia
+        if is_cme_day_boundary and trading_date != _last_reset_trading_date:
+            _last_reset_trading_date = trading_date
+            logger.info("CME day boundary: %s -> %s (trading_date=%s)",
+                        old_session, new_session, trading_date)
+
+            # STEP 0: Force-resolve any remaining open predictions
+            if not state["session_ended"]:
+                outcome_tracker.on_session_end(timestamp)
+
+            # STEP 1: End-of-day accounting (reads CLOSING day's state)
+            acct_snapshots = []
+            for acct in account_manager.get_all_accounts():
+                if acct._dd_type == "eod" and acct.status not in (
+                    AccountStatus.BLOWN, AccountStatus.RETIRED,
+                ):
+                    acct.update_eod_dd()
+                acct.end_day()
+                acct_snapshots.append({
+                    "account_id": acct.account_id,
+                    "daily_pnl": float(acct.daily_pnl),
+                    "balance": float(acct.balance),
+                    "status": acct.status.value,
+                })
+            economic_tracker.on_day_end(trading_date.isoformat(), acct_snapshots)
+
+            # STEP 2: Reset accounts for new day
+            account_manager.start_new_day()
+
+            # STEP 3: Reset levels for new trading day
+            level_engine.reset_daily()
+            level_engine.compute_levels(trading_date, current_time=timestamp)
+
+            # STEP 4: Clear pipeline state
+            pipeline._buffer.evict()
+            state["session_ended"] = False
+            return
+
+        # Regular session transition — just recompute levels
         level_engine.compute_levels(trading_date, current_time=timestamp)
 
     touch_detector.on_session_change(_on_session_change)
@@ -484,46 +537,16 @@ def run_one_config(
     pipeline.register_bbo_handler(_on_bbo)
     pipeline.register_connection_handler(_on_connection_status)
 
-    # ── Day boundary handler ─────────────────────────────────────
-    def _on_day_boundary(date_str: str) -> None:
+    # ── File-loaded callback (preload-only level init) ──────────
+    def _on_file_loaded(date_str: str) -> None:
+        if not client._preloading:
+            return  # Visible replay: day reset handled by session change
         trading_date = date.fromisoformat(date_str)
-
         level_engine.reset_daily()
-        # Compute levels at day start (6 PM ET prior day) — no lookahead
         day_start_utc = _cme_day_start_utc(trading_date)
         level_engine.compute_levels(trading_date, current_time=day_start_utc)
 
-        if client._preloading:
-            return
-
-        # End-of-day processing
-        acct_snapshots = []
-        for acct in account_manager.get_all_accounts():
-            # EOD accounts: update trailing DD from closing balance BEFORE end_day()
-            if acct._dd_type == "eod" and acct.status not in (
-                AccountStatus.BLOWN, AccountStatus.RETIRED,
-            ):
-                acct.update_eod_dd()
-
-            acct.end_day()
-            acct_snapshots.append({
-                "account_id": acct.account_id,
-                "daily_pnl": float(acct.daily_pnl),
-                "balance": float(acct.balance),
-                "status": acct.status.value,
-            })
-        economic_tracker.on_day_end(date_str, acct_snapshots)
-
-        # Reset for new day
-        account_manager.start_new_day()
-        pipeline._buffer.evict()
-        state["session_ended"] = False
-        touch_detector._session_touches.clear()
-        touch_detector._current_session = None
-
-        logger.info("Day boundary: %s", date_str)
-
-    client.on_day_boundary(_on_day_boundary)
+    client.on_file_loaded(_on_file_loaded)
 
     # ── Run replay ───────────────────────────────────────────────
     async def _run():
