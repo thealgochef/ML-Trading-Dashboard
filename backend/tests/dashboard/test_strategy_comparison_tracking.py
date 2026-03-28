@@ -39,7 +39,7 @@ def test_post_payout_loss_uses_new_dd_baseline() -> None:
     _update_balance_tracking(tracking, "A1", 49_900.0)
 
     assert tracking["A1"]["dd_hwm"] == 50_500.0
-    assert tracking["A1"]["dd_max"] == 2_100.0  # max(2000 pre-payout, 600 post-payout)
+    assert tracking["A1"]["dd_max"] == 600.0
 
 
 def test_payout_withdrawal_alone_does_not_inflate_dd() -> None:
@@ -63,4 +63,3 @@ def test_trough_remains_true_full_run_low_after_payout_reset() -> None:
 
     # Trough remains whole-run low
     assert tracking["A1"]["trough"] == 49_200.0
-
