@@ -63,6 +63,12 @@ ET = ZoneInfo("America/New_York")
 ResolutionMode = Literal["optimistic", "pessimistic"]
 TP_SL_GEOMETRIES: tuple[tuple[int, int], ...] = ((15, 15), (15, 25), (15, 30))
 
+# Strategy B simulation parameters (match run_strategy_comparison.py)
+_SIM_TP: int = 15
+_SIM_SL: int = 30
+_FLATTEN_HOUR_ET: int = 15
+_FLATTEN_MINUTE: int = 55
+
 # Stable confidence buckets for deterministic diffs
 _CONF_BUCKETS = [
     (0.00, 0.50),
@@ -93,6 +99,7 @@ class PredictionRow:
     feature_int_absorption_ratio: float | None
     entry_price_at_prediction: float
     entry_price_is_fallback: bool
+    entry_timestamp: datetime  # actual tick timestamp when prediction fired
     is_executable: bool
     mfe_points: float | None
     mae_points: float | None
@@ -192,6 +199,44 @@ def evaluate_traded_outcome(
     if direction == "long":
         return "session_end", float(last_px - entry_price)
     return "session_end", float(entry_price - last_px)
+
+
+def evaluate_traded_outcome_with_exit_ts(
+    direction: str,
+    entry_price: float,
+    tick_path: list[tuple[datetime, float]],
+    tp_points: int,
+    sl_points: int,
+) -> tuple[str, float, datetime | None]:
+    """Like evaluate_traded_outcome but returns the exit timestamp.
+
+    tick_path is [(timestamp, price), ...] sorted chronologically.
+    Returns: (exit_reason, pnl_points, exit_timestamp).
+    """
+    if not tick_path:
+        return "session_end", 0.0, None
+
+    if direction == "long":
+        tp_price = entry_price + tp_points
+        sl_price = entry_price - sl_points
+        for ts, px in tick_path:
+            if px >= tp_price:
+                return "tp", float(tp_points), ts
+            if px <= sl_price:
+                return "sl", float(-sl_points), ts
+    else:
+        tp_price = entry_price - tp_points
+        sl_price = entry_price + sl_points
+        for ts, px in tick_path:
+            if px <= tp_price:
+                return "tp", float(tp_points), ts
+            if px >= sl_price:
+                return "sl", float(-sl_points), ts
+
+    last_ts, last_px = tick_path[-1]
+    if direction == "long":
+        return "session_end", float(last_px - entry_price), last_ts
+    return "session_end", float(entry_price - last_px), last_ts
 
 
 def build_confusion_and_metrics(rows: list[dict]) -> tuple[dict[tuple[str, str], int], dict[str, dict[str, float]], dict[str, int]]:
@@ -396,7 +441,9 @@ def get_detailed_fieldnames() -> list[str]:
         "predicted_confidence", "reversal_probability", "confidence_bucket",
         "level_type", "level_price", "model_version",
         "feature_int_time_beyond_level", "feature_int_time_within_2pts", "feature_int_absorption_ratio",
-        "entry_price_at_prediction", "entry_price_is_fallback", "is_executable", "mfe_points", "mae_points",
+        "entry_price_at_prediction", "entry_price_is_fallback", "entry_timestamp",
+        "is_executable", "simulated_trade_taken", "simulated_blocked_reason",
+        "mfe_points", "mae_points",
         "default_actual_class", "default_resolution_type", "actual_class", "prediction_correct",
         "tp15_sl15_exit_reason", "tp15_sl15_pnl_points",
         "tp15_sl25_exit_reason", "tp15_sl25_pnl_points",
@@ -430,6 +477,7 @@ def run_prediction_analytics(
 
     state: dict = {
         "latest_price": None,
+        "latest_tick_ts": None,
         "predictions": [],
         "outcomes": {},
         "trade_ticks": [],
@@ -494,6 +542,7 @@ def run_prediction_analytics(
             feature_int_absorption_ratio=prediction.features.get("int_absorption_ratio"),
             entry_price_at_prediction=entry_price,
             entry_price_is_fallback=entry_price_is_fallback,
+            entry_timestamp=state["latest_tick_ts"],
             is_executable=prediction.is_executable,
             mfe_points=None,
             mae_points=None,
@@ -543,6 +592,7 @@ def run_prediction_analytics(
 
     def _on_trade(trade: TradeUpdate):
         state["latest_price"] = float(trade.price)
+        state["latest_tick_ts"] = trade.timestamp
         state["trade_ticks"].append((trade.timestamp, float(trade.price)))
         touch_detector.on_trade(trade)
         observation_manager.on_trade(trade)
@@ -585,17 +635,62 @@ def run_prediction_analytics(
 
     # Build per-prediction rows
     pred_rows: list[dict] = []
-    sorted_predictions = sorted(state["predictions"], key=lambda p: (p.timestamp, p.event_id))
+    sorted_predictions = sorted(state["predictions"], key=lambda p: (p.entry_timestamp, p.event_id))
 
     ticks = state["trade_ticks"]
+
+    # --- Strategy B position simulation (TP=15, SL=30, ignore mode) ---
+    # Tracks a single virtual position to determine which executable
+    # predictions would actually be entered vs blocked by account state.
+    sim_position_exit_ts: datetime | None = None   # when current position exits
+    sim_position_direction: str | None = None       # direction of open position
+
     for pred in sorted_predictions:
         out = state["outcomes"].get(pred.event_id, {})
         mfe = out.get("mfe_points")
         mae = out.get("mae_points")
 
-        # tick path from prediction timestamp to session-end for traded-outcome simulation
-        end_ts = _session_end_for_prediction(pred.timestamp)
-        path = [px for ts, px in ticks if pred.timestamp <= ts <= end_ts]
+        # tick path from actual entry moment to session-end for traded-outcome simulation
+        # Use entry_timestamp (the tick that triggered the prediction callback),
+        # not pred.timestamp (the original touch time ~5 min earlier).
+        # This matches live trading: TP/SL only evaluated on ticks after position opens.
+        end_ts = _session_end_for_prediction(pred.entry_timestamp)
+        path = [px for ts, px in ticks if pred.entry_timestamp <= ts <= end_ts]
+
+        # Simulate Strategy B gating for this prediction
+        sim_trade_taken = False
+        sim_blocked_reason: str | None = None
+
+        if not pred.is_executable:
+            sim_blocked_reason = "not_executable"
+        else:
+            # Gate 1: flatten time — no new trades at/after 3:55 PM ET
+            entry_et = pred.entry_timestamp.astimezone(ET)
+            past_flatten = (
+                entry_et.hour > _FLATTEN_HOUR_ET
+                or (entry_et.hour == _FLATTEN_HOUR_ET and entry_et.minute >= _FLATTEN_MINUTE)
+            )
+            if past_flatten:
+                sim_blocked_reason = "flatten_time"
+            # Gate 2: position already open (ignore mode)
+            elif sim_position_exit_ts is not None and pred.entry_timestamp < sim_position_exit_ts:
+                if sim_position_direction != pred.trade_direction:
+                    sim_blocked_reason = "conflicting_position"
+                else:
+                    sim_blocked_reason = "position_open"
+            else:
+                # Trade would be taken — simulate its exit time
+                sim_trade_taken = True
+                tick_path_ts = [(ts, px) for ts, px in ticks if pred.entry_timestamp <= ts <= end_ts]
+                _, _, exit_ts = evaluate_traded_outcome_with_exit_ts(
+                    direction=pred.trade_direction,
+                    entry_price=pred.entry_price_at_prediction,
+                    tick_path=tick_path_ts,
+                    tp_points=_SIM_TP,
+                    sl_points=_SIM_SL,
+                )
+                sim_position_exit_ts = exit_ts
+                sim_position_direction = pred.trade_direction
 
         row = {
             "event_id": pred.event_id,
@@ -617,7 +712,10 @@ def run_prediction_analytics(
             "feature_int_absorption_ratio": pred.feature_int_absorption_ratio,
             "entry_price_at_prediction": pred.entry_price_at_prediction,
             "entry_price_is_fallback": pred.entry_price_is_fallback,
+            "entry_timestamp": pred.entry_timestamp.isoformat(),
             "is_executable": pred.is_executable,
+            "simulated_trade_taken": sim_trade_taken,
+            "simulated_blocked_reason": sim_blocked_reason or "",
             "mfe_points": mfe,
             "mae_points": mae,
             "default_actual_class": out.get("default_actual_class"),
