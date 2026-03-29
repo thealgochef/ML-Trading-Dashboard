@@ -191,3 +191,28 @@ path = [px for ts, px in ticks if pred.entry_timestamp <= ts <= end_ts]
 ```
 
 This matches exactly what happens in live trading: the trade enters on the tick that completes the observation window, and TP/SL is evaluated only on ticks from that moment forward.
+
+---
+
+## Fix 2: Strategy B Position State Simulation
+
+### The Problem
+The analytics script evaluates every executable prediction independently. In the actual Strategy B runner, `TradeExecutor` skips executable signals when:
+- The account already holds a position (`get_tradeable_accounts()` requires `not a.has_position`)
+- A conflicting-direction position is open (`second_signal_mode="ignore"`)
+- The signal arrives at/after flatten time (3:55 PM ET)
+
+This means the "executable" slice in analytics is a **superset** of trades Strategy B actually takes.
+
+### The Solution
+Simulate a single virtual position (matching Strategy B's TP=15/SL=30, 5 intraday accounts, ignore mode) in the analytics prediction loop. For each executable prediction in chronological order:
+1. Check flatten-time gate (3:55 PM ET)
+2. Check if a simulated position is still open from a prior signal
+3. If both clear, mark as `simulated_trade_taken=True` and track the position's exit timestamp
+4. Otherwise, mark as blocked with a specific reason
+
+New CSV fields:
+- `simulated_trade_taken` — `True` if Strategy B would have entered this trade
+- `simulated_blocked_reason` — `""`, `"not_executable"`, `"flatten_time"`, `"position_open"`, or `"conflicting_position"`
+
+This lets you filter the analytics output to the exact slice that matches Strategy B's actual trade ledger.
