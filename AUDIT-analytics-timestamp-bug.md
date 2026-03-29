@@ -170,15 +170,24 @@ The analytics script evaluates every executable prediction independently. The st
 ### The Problem
 `run_prediction_analytics.py:597-598` constructs the TP/SL simulation path starting from `pred.timestamp` (touch time), but uses an entry price from ~5 minutes later (prediction-fire time). This includes pre-entry ticks in the simulation.
 
-### The Solution
-Start the path from `prediction.observation.end_time` (when the observation window closed and the prediction actually fired):
+### Why NOT `observation.end_time`
+An earlier draft proposed using `prediction.observation.end_time` (touch + 5min exactly). This is close but not precise:
+- `observation.end_time` is a synthetic boundary — no tick may exist at exactly that time
+- The observation completes on the **first tick whose timestamp exceeds** `end_time` (`observation_manager.py:102`)
+- Ticks between `end_time` and the actual completing tick would have already been processed before the position opened in live trading
+
+### The Correct Solution
+Capture the **actual tick timestamp** when `_on_prediction` fires — the same tick whose price is used as `entry_price`. This is the real entry moment in both live and replay.
 
 ```python
-# BEFORE (buggy):
-path = [px for ts, px in ticks if pred.timestamp <= ts <= end_ts]
+# Track the completing tick's timestamp in state
+state["latest_tick_ts"] = trade.timestamp  # set in _on_trade, before pipeline
 
-# AFTER (correct):
-path = [px for ts, px in ticks if pred.observation_end_time <= ts <= end_ts]
+# Capture it when prediction fires
+entry_timestamp = state["latest_tick_ts"]  # the tick that triggered completion
+
+# Use it as path start
+path = [px for ts, px in ticks if pred.entry_timestamp <= ts <= end_ts]
 ```
 
-This matches exactly what happens in live trading: you enter on the first tick after the observation window closes, and TP/SL is evaluated only on forward ticks from that point.
+This matches exactly what happens in live trading: the trade enters on the tick that completes the observation window, and TP/SL is evaluated only on ticks from that moment forward.

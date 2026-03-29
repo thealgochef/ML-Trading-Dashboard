@@ -93,6 +93,7 @@ class PredictionRow:
     feature_int_absorption_ratio: float | None
     entry_price_at_prediction: float
     entry_price_is_fallback: bool
+    entry_timestamp: datetime  # actual tick timestamp when prediction fired
     is_executable: bool
     mfe_points: float | None
     mae_points: float | None
@@ -396,7 +397,7 @@ def get_detailed_fieldnames() -> list[str]:
         "predicted_confidence", "reversal_probability", "confidence_bucket",
         "level_type", "level_price", "model_version",
         "feature_int_time_beyond_level", "feature_int_time_within_2pts", "feature_int_absorption_ratio",
-        "entry_price_at_prediction", "entry_price_is_fallback", "is_executable", "mfe_points", "mae_points",
+        "entry_price_at_prediction", "entry_price_is_fallback", "entry_timestamp", "is_executable", "mfe_points", "mae_points",
         "default_actual_class", "default_resolution_type", "actual_class", "prediction_correct",
         "tp15_sl15_exit_reason", "tp15_sl15_pnl_points",
         "tp15_sl25_exit_reason", "tp15_sl25_pnl_points",
@@ -430,6 +431,7 @@ def run_prediction_analytics(
 
     state: dict = {
         "latest_price": None,
+        "latest_tick_ts": None,
         "predictions": [],
         "outcomes": {},
         "trade_ticks": [],
@@ -494,6 +496,7 @@ def run_prediction_analytics(
             feature_int_absorption_ratio=prediction.features.get("int_absorption_ratio"),
             entry_price_at_prediction=entry_price,
             entry_price_is_fallback=entry_price_is_fallback,
+            entry_timestamp=state["latest_tick_ts"],
             is_executable=prediction.is_executable,
             mfe_points=None,
             mae_points=None,
@@ -543,6 +546,7 @@ def run_prediction_analytics(
 
     def _on_trade(trade: TradeUpdate):
         state["latest_price"] = float(trade.price)
+        state["latest_tick_ts"] = trade.timestamp
         state["trade_ticks"].append((trade.timestamp, float(trade.price)))
         touch_detector.on_trade(trade)
         observation_manager.on_trade(trade)
@@ -593,9 +597,12 @@ def run_prediction_analytics(
         mfe = out.get("mfe_points")
         mae = out.get("mae_points")
 
-        # tick path from prediction timestamp to session-end for traded-outcome simulation
-        end_ts = _session_end_for_prediction(pred.timestamp)
-        path = [px for ts, px in ticks if pred.timestamp <= ts <= end_ts]
+        # tick path from actual entry moment to session-end for traded-outcome simulation
+        # Use entry_timestamp (the tick that triggered the prediction callback),
+        # not pred.timestamp (the original touch time ~5 min earlier).
+        # This matches live trading: TP/SL only evaluated on ticks after position opens.
+        end_ts = _session_end_for_prediction(pred.entry_timestamp)
+        path = [px for ts, px in ticks if pred.entry_timestamp <= ts <= end_ts]
 
         row = {
             "event_id": pred.event_id,
@@ -617,6 +624,7 @@ def run_prediction_analytics(
             "feature_int_absorption_ratio": pred.feature_int_absorption_ratio,
             "entry_price_at_prediction": pred.entry_price_at_prediction,
             "entry_price_is_fallback": pred.entry_price_is_fallback,
+            "entry_timestamp": pred.entry_timestamp.isoformat(),
             "is_executable": pred.is_executable,
             "mfe_points": mfe,
             "mae_points": mae,
