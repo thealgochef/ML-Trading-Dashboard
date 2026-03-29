@@ -11,6 +11,7 @@ from run_prediction_analytics import (
     compute_entry_fallback_stats,
     confidence_bucket,
     evaluate_traded_outcome,
+    evaluate_traded_outcome_with_exit_ts,
     get_detailed_fieldnames,
     resolve_actual_class,
 )
@@ -177,7 +178,10 @@ def test_detailed_fieldnames_cover_emitted_row_keys() -> None:
                     "feature_int_absorption_ratio": 0.5,
                     "entry_price_at_prediction": 20001.0,
                     "entry_price_is_fallback": False,
+                    "entry_timestamp": "2026-01-01T15:35:00+00:00",
                     "is_executable": True,
+                    "simulated_trade_taken": True,
+                    "simulated_blocked_reason": "",
                     "mfe_points": 20.0,
                     "mae_points": 5.0,
                     "default_actual_class": "tradeable_reversal",
@@ -196,3 +200,102 @@ def test_detailed_fieldnames_cover_emitted_row_keys() -> None:
     )
     fieldnames = set(get_detailed_fieldnames()) | {"resolution_mode"}
     assert set(emitted_rows[0].keys()).issubset(fieldnames)
+
+
+# ---------------------------------------------------------------------------
+# entry_timestamp field on PredictionRow
+# ---------------------------------------------------------------------------
+
+def test_entry_timestamp_field_present_in_prediction_row_dataclass() -> None:
+    """PredictionRow must carry entry_timestamp for path reconstruction."""
+    fields = PredictionRow.__dataclass_fields__
+    assert "entry_timestamp" in fields
+
+
+def test_entry_timestamp_in_detailed_fieldnames() -> None:
+    """entry_timestamp must appear in the CSV schema."""
+    assert "entry_timestamp" in get_detailed_fieldnames()
+
+
+# ---------------------------------------------------------------------------
+# evaluate_traded_outcome_with_exit_ts
+# ---------------------------------------------------------------------------
+
+def test_evaluate_with_exit_ts_returns_tp_timestamp() -> None:
+    """TP hit returns the timestamp of the triggering tick."""
+    t0 = datetime(2026, 3, 2, 15, 0, 0, tzinfo=UTC)
+    t1 = datetime(2026, 3, 2, 15, 0, 1, tzinfo=UTC)
+    t2 = datetime(2026, 3, 2, 15, 0, 2, tzinfo=UTC)
+
+    tick_path = [(t0, 101.0), (t1, 110.0), (t2, 116.0)]
+    reason, pnl, exit_ts = evaluate_traded_outcome_with_exit_ts("long", 100.0, tick_path, 15, 30)
+
+    assert reason == "tp"
+    assert pnl == 15.0
+    assert exit_ts == t2
+
+
+def test_evaluate_with_exit_ts_returns_sl_timestamp() -> None:
+    """SL hit returns the timestamp of the triggering tick."""
+    t0 = datetime(2026, 3, 2, 15, 0, 0, tzinfo=UTC)
+    t1 = datetime(2026, 3, 2, 15, 0, 1, tzinfo=UTC)
+
+    tick_path = [(t0, 99.0), (t1, 69.0)]
+    reason, pnl, exit_ts = evaluate_traded_outcome_with_exit_ts("long", 100.0, tick_path, 15, 30)
+
+    assert reason == "sl"
+    assert pnl == -30.0
+    assert exit_ts == t1
+
+
+def test_evaluate_with_exit_ts_session_end_fallback() -> None:
+    """No TP/SL hit returns session_end with last tick timestamp."""
+    t0 = datetime(2026, 3, 2, 15, 0, 0, tzinfo=UTC)
+    t1 = datetime(2026, 3, 2, 15, 50, 0, tzinfo=UTC)
+
+    tick_path = [(t0, 101.0), (t1, 103.0)]
+    reason, pnl, exit_ts = evaluate_traded_outcome_with_exit_ts("long", 100.0, tick_path, 15, 30)
+
+    assert reason == "session_end"
+    assert pnl == 3.0
+    assert exit_ts == t1
+
+
+def test_evaluate_with_exit_ts_empty_path() -> None:
+    """Empty tick path returns session_end with None timestamp."""
+    reason, pnl, exit_ts = evaluate_traded_outcome_with_exit_ts("long", 100.0, [], 15, 30)
+
+    assert reason == "session_end"
+    assert pnl == 0.0
+    assert exit_ts is None
+
+
+def test_evaluate_with_exit_ts_short_direction() -> None:
+    """Short direction: TP when price drops, SL when price rises."""
+    t0 = datetime(2026, 3, 2, 15, 0, 0, tzinfo=UTC)
+    t1 = datetime(2026, 3, 2, 15, 0, 1, tzinfo=UTC)
+
+    # TP hit for short
+    tick_path = [(t0, 99.0), (t1, 85.0)]
+    reason, pnl, exit_ts = evaluate_traded_outcome_with_exit_ts("short", 100.0, tick_path, 15, 30)
+    assert reason == "tp"
+    assert pnl == 15.0
+    assert exit_ts == t1
+
+    # SL hit for short
+    tick_path_sl = [(t0, 101.0), (t1, 131.0)]
+    reason, pnl, exit_ts = evaluate_traded_outcome_with_exit_ts("short", 100.0, tick_path_sl, 15, 30)
+    assert reason == "sl"
+    assert pnl == -30.0
+    assert exit_ts == t1
+
+
+# ---------------------------------------------------------------------------
+# simulated_trade_taken / simulated_blocked_reason in CSV schema
+# ---------------------------------------------------------------------------
+
+def test_simulated_fields_in_detailed_fieldnames() -> None:
+    """simulated_trade_taken and simulated_blocked_reason must be in CSV schema."""
+    fieldnames = get_detailed_fieldnames()
+    assert "simulated_trade_taken" in fieldnames
+    assert "simulated_blocked_reason" in fieldnames
