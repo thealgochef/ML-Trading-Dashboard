@@ -51,6 +51,10 @@ class DashboardSettings(BaseSettings):
     # Replay data directory (Parquet files organized by date)
     replay_data_dir: Path = Path("../data/databento/NQ")
 
+    # Optional touch-layer level disabling, comma-separated level names.
+    # Example: "pdh,pdl"
+    disabled_levels: str | None = None
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="DASHBOARD_",

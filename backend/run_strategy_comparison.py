@@ -33,9 +33,9 @@ if str(_SRC_DIR) not in sys.path:
 from alpha_lab.dashboard.config.settings import DashboardSettings
 from alpha_lab.dashboard.engine.feature_computer import FeatureComputer
 from alpha_lab.dashboard.engine.level_engine import LevelEngine, _cme_day_start_utc
-from alpha_lab.dashboard.engine.models import ObservationStatus
+from alpha_lab.dashboard.engine.models import LevelType, ObservationStatus
 from alpha_lab.dashboard.engine.observation_manager import ObservationManager
-from alpha_lab.dashboard.engine.touch_detector import TouchDetector
+from alpha_lab.dashboard.engine.touch_detector import TouchDetector, parse_disabled_level_types
 from alpha_lab.dashboard.model.model_manager import ModelManager
 from alpha_lab.dashboard.model.outcome_tracker import OutcomeTracker
 from alpha_lab.dashboard.model.prediction_engine import PredictionEngine
@@ -196,6 +196,7 @@ def run_one_strategy(
     data_dir: Path,
     start_date: str,
     end_date: str,
+    disabled_level_types: set[LevelType] | None = None,
 ) -> dict:
     """Run a single strategy through the full replay pipeline."""
     # Suppress verbose pipeline logging during batch replay
@@ -254,7 +255,10 @@ def run_one_strategy(
 
     # Engine components
     level_engine = LevelEngine(pipeline._buffer)
-    touch_detector = TouchDetector(level_engine)
+    touch_detector = TouchDetector(
+        level_engine,
+        disabled_level_types=disabled_level_types,
+    )
     observation_manager = ObservationManager(FeatureComputer())
     prediction_engine = PredictionEngine(model_manager)
     outcome_tracker = OutcomeTracker()
@@ -790,7 +794,14 @@ def main():
         default=None,
         help="Override replay data directory",
     )
+    parser.add_argument(
+        "--disable-levels",
+        type=str,
+        default="",
+        help="Comma-separated level types to disable at touch layer (e.g. pdh,pdl)",
+    )
     args = parser.parse_args()
+    disabled_level_types = parse_disabled_level_types(args.disable_levels)
 
     # Filter strategies
     if args.strategies:
@@ -840,6 +851,7 @@ def main():
                 data_dir=data_dir,
                 start_date=args.start,
                 end_date=args.end,
+                disabled_level_types=disabled_level_types,
             )
             results.append(result)
         except Exception:
