@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 from alpha_lab.dashboard.engine.level_engine import LevelEngine
 from alpha_lab.dashboard.engine.models import (
+    LevelType,
     LevelSide,
     TouchEvent,
     TradeDirection,
@@ -39,6 +40,15 @@ ET = ZoneInfo("America/New_York")
 # NOTE: Must use ET to match flatten time (position_monitor.py).
 _CUTOFF_HOUR = 15
 _CUTOFF_MINUTE = 49
+_LEVEL_TYPE_NAME_MAP: dict[str, LevelType] = {
+    "pdh": LevelType.PDH,
+    "pdl": LevelType.PDL,
+    "asia_high": LevelType.ASIA_HIGH,
+    "asia_low": LevelType.ASIA_LOW,
+    "london_high": LevelType.LONDON_HIGH,
+    "london_low": LevelType.LONDON_LOW,
+    "manual": LevelType.MANUAL,
+}
 
 
 def _classify_session(ts_utc: datetime) -> str:
@@ -61,6 +71,28 @@ def _classify_session(ts_utc: datetime) -> str:
     return "post_market"
 
 
+def parse_disabled_level_types(raw_value: str | None) -> set[LevelType]:
+    """Parse comma-separated level names into LevelType values."""
+    if raw_value is None:
+        return set()
+
+    cleaned = raw_value.strip().lower()
+    if not cleaned:
+        return set()
+
+    out: set[LevelType] = set()
+    for token in cleaned.split(","):
+        key = token.strip()
+        if not key:
+            continue
+        lt = _LEVEL_TYPE_NAME_MAP.get(key)
+        if lt is None:
+            valid = ", ".join(sorted(_LEVEL_TYPE_NAME_MAP.keys()))
+            raise ValueError(f"Invalid level type '{key}'. Valid values: {valid}")
+        out.add(lt)
+    return out
+
+
 class TouchDetector:
     """Monitors live trades against active level zones.
 
@@ -69,7 +101,11 @@ class TouchDetector:
     first-touch state independently.
     """
 
-    def __init__(self, level_engine: LevelEngine) -> None:
+    def __init__(
+        self,
+        level_engine: LevelEngine,
+        disabled_level_types: set[LevelType] | None = None,
+    ) -> None:
         self._engine = level_engine
         self._callbacks: list[Callable[[TouchEvent], None]] = []
         self._session_change_callbacks: list[Callable[[str | None, str, datetime], None]] = []
@@ -78,6 +114,7 @@ class TouchDetector:
         # without permanently spending the zone for RTH.
         self._session_touches: set[str] = set()
         self._current_session: str | None = None
+        self._disabled_level_types = set(disabled_level_types or set())
 
     def on_trade(self, trade: TradeUpdate) -> TouchEvent | None:
         """Process a trade. Returns a TouchEvent if this trade triggers
@@ -112,6 +149,8 @@ class TouchDetector:
             return None
 
         for zone in self._engine.get_active_zones():
+            if any(level.level_type in self._disabled_level_types for level in zone.levels):
+                continue
             # During non-RTH: skip if already touched in this session
             if session != "ny_rth" and zone.zone_id in self._session_touches:
                 continue
