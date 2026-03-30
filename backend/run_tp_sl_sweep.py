@@ -37,9 +37,9 @@ if str(_SRC_DIR) not in sys.path:
 from alpha_lab.dashboard.config.settings import DashboardSettings
 from alpha_lab.dashboard.engine.feature_computer import FeatureComputer
 from alpha_lab.dashboard.engine.level_engine import LevelEngine, _cme_day_start_utc
-from alpha_lab.dashboard.engine.models import ObservationStatus
+from alpha_lab.dashboard.engine.models import LevelType, ObservationStatus
 from alpha_lab.dashboard.engine.observation_manager import ObservationManager
-from alpha_lab.dashboard.engine.touch_detector import TouchDetector
+from alpha_lab.dashboard.engine.touch_detector import TouchDetector, parse_disabled_level_types
 from alpha_lab.dashboard.model.model_manager import ModelManager
 from alpha_lab.dashboard.model.outcome_tracker import OutcomeTracker
 from alpha_lab.dashboard.model.prediction_engine import PredictionEngine
@@ -181,6 +181,7 @@ def run_one_config(
     start_date: str,
     end_date: str,
     compare_dd: bool = False,
+    disabled_level_types: set[LevelType] | None = None,
 ) -> dict | tuple[dict, dict]:
     """Run a single TP/SL configuration through the full replay pipeline.
 
@@ -236,7 +237,10 @@ def run_one_config(
 
     # Engine components
     level_engine = LevelEngine(pipeline._buffer)
-    touch_detector = TouchDetector(level_engine)
+    touch_detector = TouchDetector(
+        level_engine,
+        disabled_level_types=disabled_level_types,
+    )
     observation_manager = ObservationManager(FeatureComputer())
     prediction_engine = PredictionEngine(model_manager)
     outcome_tracker = OutcomeTracker()
@@ -664,7 +668,14 @@ def main():
         action="store_true",
         help="Run intraday vs EOD trailing DD comparison (10 accounts per config)",
     )
+    parser.add_argument(
+        "--disable-levels",
+        type=str,
+        default="",
+        help="Comma-separated level types to disable at touch layer (e.g. pdh,pdl)",
+    )
     args = parser.parse_args()
+    disabled_level_types = parse_disabled_level_types(args.disable_levels)
 
     # Parse configs
     if args.configs:
@@ -711,6 +722,7 @@ def main():
                 start_date=args.start,
                 end_date=args.end,
                 compare_dd=args.compare_dd,
+                disabled_level_types=disabled_level_types,
             )
             if args.compare_dd:
                 intraday_result, eod_result = result

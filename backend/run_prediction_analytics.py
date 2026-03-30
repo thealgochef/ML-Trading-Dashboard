@@ -41,7 +41,8 @@ from alpha_lab.dashboard.engine.feature_computer import FeatureComputer
 from alpha_lab.dashboard.engine.level_engine import LevelEngine, _cme_day_start_utc
 from alpha_lab.dashboard.engine.models import ObservationStatus
 from alpha_lab.dashboard.engine.observation_manager import ObservationManager
-from alpha_lab.dashboard.engine.touch_detector import TouchDetector
+from alpha_lab.dashboard.engine.touch_detector import TouchDetector, parse_disabled_level_types
+from alpha_lab.dashboard.engine.models import LevelType
 from alpha_lab.dashboard.model import CLASS_NAMES
 from alpha_lab.dashboard.model.model_manager import ModelManager
 from alpha_lab.dashboard.model.outcome_tracker import (
@@ -514,6 +515,7 @@ def run_prediction_analytics(
     end_date: str,
     resolution_mode: Literal["optimistic", "pessimistic", "both"] = "both",
     min_breakdown_samples: int = 10,
+    disabled_level_types: set[LevelType] | None = None,
 ) -> tuple[Path, Path]:
     """Run replay and generate prediction analytics exports."""
     logging.getLogger("alpha_lab").setLevel(logging.WARNING)
@@ -525,7 +527,10 @@ def run_prediction_analytics(
     client = ReplayClient(data_dir=data_dir, start_date=start_date, end_date=end_date, speed=9999.0)
     pipeline = PipelineService(settings, client=client)
     level_engine = LevelEngine(pipeline._buffer)
-    touch_detector = TouchDetector(level_engine)
+    touch_detector = TouchDetector(
+        level_engine,
+        disabled_level_types=disabled_level_types,
+    )
     observation_manager = ObservationManager(FeatureComputer())
     prediction_engine = PredictionEngine(model_manager)
     outcome_tracker = OutcomeTracker()
@@ -1149,6 +1154,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default=str(_BACKEND_DIR / "analytics_results"), help="Output directory for CSVs")
     parser.add_argument("--resolution-mode", choices=["optimistic", "pessimistic", "both"], default="both")
     parser.add_argument("--min-breakdown-samples", type=int, default=10)
+    parser.add_argument(
+        "--disable-levels",
+        default="",
+        help="Comma-separated level types to disable at touch layer (e.g. pdh,pdl)",
+    )
     return parser.parse_args()
 
 
@@ -1162,6 +1172,7 @@ def main() -> None:
         end_date=args.end,
         resolution_mode=args.resolution_mode,
         min_breakdown_samples=args.min_breakdown_samples,
+        disabled_level_types=parse_disabled_level_types(args.disable_levels),
     )
 
 

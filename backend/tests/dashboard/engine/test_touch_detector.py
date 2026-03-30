@@ -25,7 +25,10 @@ from alpha_lab.dashboard.engine.models import (
     TouchEvent,
     TradeDirection,
 )
-from alpha_lab.dashboard.engine.touch_detector import TouchDetector
+from alpha_lab.dashboard.engine.touch_detector import (
+    TouchDetector,
+    parse_disabled_level_types,
+)
 from alpha_lab.dashboard.pipeline.price_buffer import PriceBuffer
 from alpha_lab.dashboard.pipeline.rithmic_client import TradeUpdate
 
@@ -261,6 +264,84 @@ def test_touch_event_fields():
     assert isinstance(event.price_at_touch, Decimal)
     assert event.price_at_touch == Decimal("20152.00")
     assert isinstance(event.trade_direction, TradeDirection)
+
+
+def test_disabled_level_types_default_behavior_unchanged() -> None:
+    zone = _make_zone(20150.00, LevelSide.HIGH, level_type=LevelType.PDH)
+    engine = _make_engine_with_zones([zone])
+
+    event_default = TouchDetector(engine).on_trade(
+        _trade(datetime(2026, 3, 2, 14, 35, tzinfo=UTC), 20150.00)
+    )
+    assert event_default is not None
+
+
+def test_disabled_pdh_skips_touch() -> None:
+    zone = _make_zone(20150.00, LevelSide.HIGH, level_type=LevelType.PDH)
+    engine = _make_engine_with_zones([zone])
+    detector = TouchDetector(engine, disabled_level_types={LevelType.PDH})
+
+    event = detector.on_trade(_trade(datetime(2026, 3, 2, 14, 35, tzinfo=UTC), 20150.00))
+    assert event is None
+
+
+def test_non_disabled_level_still_touches() -> None:
+    zone = _make_zone(20050.00, LevelSide.LOW, level_type=LevelType.PDL)
+    engine = _make_engine_with_zones([zone])
+    detector = TouchDetector(engine, disabled_level_types={LevelType.PDH})
+
+    event = detector.on_trade(_trade(datetime(2026, 3, 2, 14, 35, tzinfo=UTC), 20050.00))
+    assert event is not None
+    assert event.level_zone.zone_id == "z1"
+
+
+def test_mixed_zone_skipped_when_any_constituent_level_disabled() -> None:
+    high_level = KeyLevel(
+        level_type=LevelType.PDH,
+        price=Decimal("20100.00"),
+        side=LevelSide.HIGH,
+        available_from=datetime(2026, 3, 2, 0, 0, tzinfo=UTC),
+        source_session_date=date(2026, 3, 2),
+    )
+    low_level = KeyLevel(
+        level_type=LevelType.PDL,
+        price=Decimal("20100.25"),
+        side=LevelSide.LOW,
+        available_from=datetime(2026, 3, 2, 0, 0, tzinfo=UTC),
+        source_session_date=date(2026, 3, 2),
+    )
+    zone = LevelZone(
+        zone_id="mixed_ablation",
+        representative_price=Decimal("20100.00"),
+        levels=[high_level, low_level],
+        side=LevelSide.HIGH,
+    )
+    engine = _make_engine_with_zones([zone])
+    detector = TouchDetector(engine, disabled_level_types={LevelType.PDH})
+
+    event = detector.on_trade(_trade(datetime(2026, 3, 2, 14, 35, tzinfo=UTC), 20100.00))
+    assert event is None
+
+
+def test_parse_disabled_level_types_maps_valid_values() -> None:
+    parsed = parse_disabled_level_types("pdh,pdl,asia_high,asia_low,london_high,london_low,manual")
+    assert parsed == {
+        LevelType.PDH,
+        LevelType.PDL,
+        LevelType.ASIA_HIGH,
+        LevelType.ASIA_LOW,
+        LevelType.LONDON_HIGH,
+        LevelType.LONDON_LOW,
+        LevelType.MANUAL,
+    }
+
+
+def test_parse_disabled_level_types_invalid_value_raises_clean_error() -> None:
+    try:
+        parse_disabled_level_types("pdh,not_a_level")
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "Invalid level type 'not_a_level'" in str(exc)
 
 
 def test_no_active_zones_no_detection():
