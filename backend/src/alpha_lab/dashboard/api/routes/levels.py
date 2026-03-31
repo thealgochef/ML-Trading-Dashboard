@@ -14,6 +14,7 @@ from decimal import Decimal
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from alpha_lab.dashboard.api.level_serialization import serialize_zones
 from alpha_lab.dashboard.api.schemas import AddManualLevelRequest
 
 router = APIRouter(prefix="/api/levels", tags=["levels"])
@@ -25,22 +26,7 @@ async def get_levels(request: Request) -> dict:
     if state.level_engine is None:
         return {"zones": [], "manual_levels": []}
 
-    zones = []
-    for zone in state.level_engine.all_zones:
-        zones.append({
-            "zone_id": zone.zone_id,
-            "price": float(zone.representative_price),
-            "side": zone.side.value,
-            "is_touched": zone.is_touched,
-            "levels": [
-                {
-                    "type": lv.level_type.value,
-                    "price": float(lv.price),
-                    "is_manual": lv.is_manual,
-                }
-                for lv in zone.levels
-            ],
-        })
+    zones = serialize_zones(state.level_engine.all_zones, state.disabled_level_types)
 
     manual = [
         {"price": float(lv.price), "type": lv.level_type.value}
