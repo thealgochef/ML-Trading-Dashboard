@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING
 
 from starlette.websockets import WebSocket, WebSocketState
 
+from alpha_lab.dashboard.api.level_serialization import serialize_zones
+
 if TYPE_CHECKING:
     from alpha_lab.dashboard.api.server import DashboardState
 
@@ -149,24 +151,13 @@ class WebSocketManager:
 
     def assemble_backfill(self, state: DashboardState) -> dict:
         """Build an atomic snapshot of all current state for a new client."""
-        # Active levels
+        # Levels (include touched/disabled state; same semantics as live updates/REST)
         active_levels = []
         if state.level_engine is not None:
-            for zone in state.level_engine.get_active_zones():
-                active_levels.append({
-                    "zone_id": zone.zone_id,
-                    "price": float(zone.representative_price),
-                    "side": zone.side.value,
-                    "is_touched": zone.is_touched,
-                    "levels": [
-                        {
-                            "type": lv.level_type.value,
-                            "price": float(lv.price),
-                            "is_manual": lv.is_manual,
-                        }
-                        for lv in zone.levels
-                    ],
-                })
+            active_levels = serialize_zones(
+                state.level_engine.all_zones,
+                state.disabled_level_types,
+            )
 
         # Active observation
         active_obs = None

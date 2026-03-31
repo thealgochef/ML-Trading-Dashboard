@@ -7,13 +7,14 @@ the system monitors for touch events and trade signals.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
 from alpha_lab.dashboard.api.server import DashboardState, create_app
 from alpha_lab.dashboard.engine.level_engine import LevelEngine
+from alpha_lab.dashboard.engine.models import KeyLevel, LevelSide, LevelType, LevelZone
 from alpha_lab.dashboard.pipeline.price_buffer import PriceBuffer
 from alpha_lab.dashboard.trading.account_manager import AccountManager
 from alpha_lab.dashboard.trading.position_monitor import PositionMonitor
@@ -56,6 +57,51 @@ async def test_get_levels(levels_client):
     assert "zones" in data
     assert "manual_levels" in data
     assert isinstance(data["zones"], list)
+
+
+@pytest.mark.asyncio
+async def test_get_levels_includes_disabled_fields_consistently(levels_state, levels_client):
+    """GET /api/levels includes touched/disabled fields from shared serializer."""
+    pdh_level = KeyLevel(
+        level_type=LevelType.PDH,
+        price=Decimal("21050.0"),
+        side=LevelSide.HIGH,
+        available_from=datetime(2026, 3, 2, 0, 0, tzinfo=UTC),
+        source_session_date=date(2026, 3, 2),
+    )
+    pdl_level = KeyLevel(
+        level_type=LevelType.PDL,
+        price=Decimal("20950.0"),
+        side=LevelSide.LOW,
+        available_from=datetime(2026, 3, 2, 0, 0, tzinfo=UTC),
+        source_session_date=date(2026, 3, 2),
+    )
+    levels_state.level_engine._zones = [
+        LevelZone(
+            zone_id="z_touched_pdh",
+            representative_price=Decimal("21050.0"),
+            levels=[pdh_level],
+            side=LevelSide.HIGH,
+            is_touched=True,
+        ),
+        LevelZone(
+            zone_id="z_active_pdl",
+            representative_price=Decimal("20950.0"),
+            levels=[pdl_level],
+            side=LevelSide.LOW,
+            is_touched=False,
+        ),
+    ]
+    levels_state.disabled_level_types = {LevelType.PDH}
+
+    resp = await levels_client.get("/api/levels")
+    assert resp.status_code == 200
+    zones = {z["zone_id"]: z for z in resp.json()["zones"]}
+    assert zones["z_touched_pdh"]["is_touched"] is True
+    assert zones["z_touched_pdh"]["is_disabled"] is True
+    assert zones["z_touched_pdh"]["disabled_level_types"] == ["pdh"]
+    assert zones["z_active_pdl"]["is_disabled"] is False
+    assert zones["z_active_pdl"]["disabled_level_types"] == []
 
 
 @pytest.mark.asyncio

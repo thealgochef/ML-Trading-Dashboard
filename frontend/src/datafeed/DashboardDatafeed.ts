@@ -41,6 +41,10 @@ function toChartBar(bar: BackendBar): ChartBar {
   };
 }
 
+function isTickTimeframe(timeframe: string | null): boolean {
+  return timeframe === '987t' || timeframe === '2000t';
+}
+
 export type BarUpdateCallback = (bar: ChartBar, timeframe: string) => void;
 
 export class DashboardDatafeed {
@@ -48,11 +52,14 @@ export class DashboardDatafeed {
   private unsubPrice: (() => void) | null = null;
   private unsubBar: (() => void) | null = null;
 
-  /** The in-progress bar being updated by price_update messages. */
+  /** The in-progress bar being updated by price_update messages (non-tick only). */
   private currentBar: ChartBar | null = null;
 
   /** Time of the last completed bar — new bars must have time > this. */
   private lastCompletedBarTime: number = 0;
+
+  /** Prevent overlapping backend refreshes for tick partial bars. */
+  private tickRefreshInFlight = false;
 
   onBarUpdate: BarUpdateCallback | null = null;
 
@@ -94,10 +101,15 @@ export class DashboardDatafeed {
 
   /**
    * Initialize currentBar from the last bar returned by fetchBars().
-   * Called by TradingChart after series.setData() so that subsequent
-   * price_update messages update the rightmost candle.
+   * Called by TradingChart after series.setData(). For tick timeframes,
+   * the backend is the source of truth for the rightmost partial bar.
    */
   setLastBar(bar: ChartBar): void {
+    if (isTickTimeframe(this.subscribedTimeframe)) {
+      this.currentBar = null;
+      this.lastCompletedBarTime = bar.time - 1;
+      return;
+    }
     this.currentBar = { ...bar };
     this.lastCompletedBarTime = bar.time - 1;
   }
@@ -117,10 +129,16 @@ export class DashboardDatafeed {
 
   /**
    * price_update arrives ~1/sec with the latest trade price.
-   * Update the in-progress bar's OHLC and push to chart.
+   * - Tick timeframes: refresh rightmost bar from backend true partial state.
+   * - Non-tick timeframes: continue local in-progress approximation.
    */
   private handlePriceUpdate(data: { price: number; timestamp: string }): void {
     if (!this.onBarUpdate || !this.subscribedTimeframe) return;
+
+    if (isTickTimeframe(this.subscribedTimeframe)) {
+      this.refreshTickPartialBar();
+      return;
+    }
 
     const price = data.price;
 
@@ -144,6 +162,25 @@ export class DashboardDatafeed {
     this.onBarUpdate({ ...this.currentBar }, this.subscribedTimeframe);
   }
 
+  private async refreshTickPartialBar(): Promise<void> {
+    if (!this.onBarUpdate || !this.subscribedTimeframe) return;
+    if (!isTickTimeframe(this.subscribedTimeframe) || this.tickRefreshInFlight) return;
+
+    this.tickRefreshInFlight = true;
+    const timeframe = this.subscribedTimeframe;
+
+    try {
+      const bars = await this.fetchBars(timeframe);
+      if (this.subscribedTimeframe !== timeframe || bars.length === 0) return;
+      const rightmost = bars[bars.length - 1];
+      this.onBarUpdate(rightmost, timeframe);
+    } catch (err) {
+      console.error('tick partial refresh failed', err);
+    } finally {
+      this.tickRefreshInFlight = false;
+    }
+  }
+
   /**
    * bar_update arrives when a bar completes. Finalize and start fresh.
    */
@@ -154,12 +191,17 @@ export class DashboardDatafeed {
     this.onBarUpdate(completedBar, data.timeframe);
     this.lastCompletedBarTime = completedBar.time;
     this.currentBar = null;
+
+    if (isTickTimeframe(data.timeframe) && this.subscribedTimeframe === data.timeframe) {
+      void this.refreshTickPartialBar();
+    }
   }
 
   subscribeTimeframe(timeframe: string): void {
     this.subscribedTimeframe = timeframe;
     this.currentBar = null;
     this.lastCompletedBarTime = 0;
+    this.tickRefreshInFlight = false;
     wsManager.send({
       type: 'subscribe_timeframe',
       data: { timeframe },
@@ -173,6 +215,7 @@ export class DashboardDatafeed {
     this.subscribedTimeframe = null;
     this.currentBar = null;
     this.lastCompletedBarTime = 0;
+    this.tickRefreshInFlight = false;
     this.unsubPrice?.();
     this.unsubBar?.();
     this.unsubPrice = null;

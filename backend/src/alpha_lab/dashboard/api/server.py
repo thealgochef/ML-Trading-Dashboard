@@ -21,6 +21,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from alpha_lab.dashboard.api.websocket import WebSocketManager
+from alpha_lab.dashboard.api.level_serialization import serialize_zones
 from alpha_lab.dashboard.config.settings import DashboardSettings
 from alpha_lab.dashboard.engine.feature_computer import FeatureComputer
 from alpha_lab.dashboard.engine.level_engine import LevelEngine, _cme_day_start_utc
@@ -673,22 +674,7 @@ def _wire_pipeline_callbacks(
     # ── Level broadcast helper ────────────────────────────────
     def _broadcast_levels() -> None:
         """Build zones payload and broadcast level_update to all WS clients."""
-        zones_data = []
-        for zone in level_engine.all_zones:
-            zones_data.append({
-                "zone_id": zone.zone_id,
-                "price": float(zone.representative_price),
-                "side": zone.side.value,
-                "is_touched": zone.is_touched,
-                "levels": [
-                    {
-                        "type": lv.level_type.value,
-                        "price": float(lv.price),
-                        "is_manual": lv.is_manual,
-                    }
-                    for lv in zone.levels
-                ],
-            })
+        zones_data = serialize_zones(level_engine.all_zones, state.disabled_level_types)
         _schedule_broadcast({
             "type": "level_update",
             "data": {"action": "full_refresh", "levels": zones_data},
