@@ -108,15 +108,36 @@ export class ChartManager {
 
     for (const zone of zones) {
       for (const level of zone.levels) {
-        const color = LEVEL_COLORS[level.type] ?? '#78909c';
+        const baseColor = LEVEL_COLORS[level.type] ?? '#78909c';
         const label = LEVEL_LABELS[level.type] ?? level.type;
+        const isDisabled = Boolean(zone.is_disabled);
+        const isTouched = Boolean(zone.is_touched);
+
+        let color = baseColor;
+        let lineStyle: 0 | 1 | 2 | 3 = 0;
+        let titleSuffix = '';
+
+        if (isDisabled && isTouched) {
+          color = '#607d8b';
+          lineStyle = 3;
+          titleSuffix = ' (DISABLED/TOUCHED)';
+        } else if (isDisabled) {
+          color = '#607d8b';
+          lineStyle = 2;
+          titleSuffix = ' (DISABLED)';
+        } else if (isTouched) {
+          color = `${baseColor}99`;
+          lineStyle = 1;
+          titleSuffix = ' (TOUCHED)';
+        }
+
         const line = this.series.createPriceLine({
           price: level.price,
           color,
           lineWidth: 1,
-          lineStyle: zone.is_touched ? 1 : 0,
+          lineStyle,
           axisLabelVisible: true,
-          title: label,
+          title: `${label}${titleSuffix}`,
         });
         this.levelLines.push(line);
       }

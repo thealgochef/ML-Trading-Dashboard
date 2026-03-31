@@ -674,12 +674,20 @@ def _wire_pipeline_callbacks(
     def _broadcast_levels() -> None:
         """Build zones payload and broadcast level_update to all WS clients."""
         zones_data = []
+        disabled_level_types = state.disabled_level_types or set()
         for zone in level_engine.all_zones:
+            zone_disabled_types = sorted({
+                lv.level_type.value
+                for lv in zone.levels
+                if lv.level_type in disabled_level_types
+            })
             zones_data.append({
                 "zone_id": zone.zone_id,
                 "price": float(zone.representative_price),
                 "side": zone.side.value,
                 "is_touched": zone.is_touched,
+                "is_disabled": bool(zone_disabled_types),
+                "disabled_level_types": zone_disabled_types,
                 "levels": [
                     {
                         "type": lv.level_type.value,

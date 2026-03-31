@@ -7,13 +7,14 @@ the system monitors for touch events and trade signals.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
 from alpha_lab.dashboard.api.server import DashboardState, create_app
 from alpha_lab.dashboard.engine.level_engine import LevelEngine
+from alpha_lab.dashboard.engine.models import KeyLevel, LevelSide, LevelType, LevelZone
 from alpha_lab.dashboard.pipeline.price_buffer import PriceBuffer
 from alpha_lab.dashboard.trading.account_manager import AccountManager
 from alpha_lab.dashboard.trading.position_monitor import PositionMonitor
@@ -94,3 +95,30 @@ async def test_delete_nonexistent_level(levels_client):
     """DELETE /api/levels/manual/{price} returns 404 for missing level."""
     resp = await levels_client.delete("/api/levels/manual/99999.0")
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_levels_includes_disabled_zone_fields(levels_state, levels_client):
+    level = KeyLevel(
+        level_type=LevelType.PDH,
+        price=Decimal("21045.75"),
+        side=LevelSide.HIGH,
+        available_from=datetime(2026, 1, 2, 0, 0, tzinfo=UTC),
+        source_session_date=date(2026, 1, 2),
+    )
+    levels_state.level_engine._zones = [
+        LevelZone(
+            zone_id="z_pdh",
+            representative_price=Decimal("21045.75"),
+            levels=[level],
+            side=LevelSide.HIGH,
+        )
+    ]
+    levels_state.disabled_level_types = {LevelType.PDH}
+
+    resp = await levels_client.get("/api/levels")
+    assert resp.status_code == 200
+    zones = resp.json()["zones"]
+    assert len(zones) == 1
+    assert zones[0]["is_disabled"] is True
+    assert zones[0]["disabled_level_types"] == ["pdh"]
