@@ -26,12 +26,20 @@ async def get_levels(request: Request) -> dict:
         return {"zones": [], "manual_levels": []}
 
     zones = []
+    disabled_level_types = state.disabled_level_types or set()
     for zone in state.level_engine.all_zones:
+        zone_disabled_types = sorted({
+            lv.level_type.value
+            for lv in zone.levels
+            if lv.level_type in disabled_level_types
+        })
         zones.append({
             "zone_id": zone.zone_id,
             "price": float(zone.representative_price),
             "side": zone.side.value,
             "is_touched": zone.is_touched,
+            "is_disabled": bool(zone_disabled_types),
+            "disabled_level_types": zone_disabled_types,
             "levels": [
                 {
                     "type": lv.level_type.value,

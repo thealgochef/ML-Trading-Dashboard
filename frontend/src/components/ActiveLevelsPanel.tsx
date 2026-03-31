@@ -31,6 +31,7 @@ export function ActiveLevelsPanel() {
       zone_id: zone.zone_id,
       side: zone.side,
       is_touched: zone.is_touched,
+      is_disabled: Boolean(zone.is_disabled),
       zone_price: zone.price,
     })),
   );
@@ -52,8 +53,15 @@ export function ActiveLevelsPanel() {
               key={`${lvl.zone_id}-${lvl.type}-${i}`}
               className="flex items-center justify-between text-xs font-mono"
             >
-              <span className={LEVEL_COLORS[lvl.type] ?? 'text-gray-400'}>
+              <span
+                className={[
+                  LEVEL_COLORS[lvl.type] ?? 'text-gray-400',
+                  lvl.is_disabled ? 'opacity-55' : '',
+                ].join(' ').trim()}
+                title={lvl.is_disabled ? 'Disabled level (shown for context)' : 'Active level'}
+              >
                 {LEVEL_LABELS[lvl.type] ?? lvl.type}
+                {lvl.is_disabled && <span className="ml-1 text-[#777]">(D)</span>}
                 {lvl.is_touched && <span className="ml-1 text-[#555]">(T)</span>}
               </span>
               <span className="text-white tabular-nums">

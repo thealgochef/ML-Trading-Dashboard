@@ -41,7 +41,8 @@ from alpha_lab.dashboard.engine.feature_computer import FeatureComputer
 from alpha_lab.dashboard.engine.level_engine import LevelEngine, _cme_day_start_utc
 from alpha_lab.dashboard.engine.models import ObservationStatus
 from alpha_lab.dashboard.engine.observation_manager import ObservationManager
-from alpha_lab.dashboard.engine.touch_detector import TouchDetector
+from alpha_lab.dashboard.engine.touch_detector import TouchDetector, parse_disabled_level_types
+from alpha_lab.dashboard.engine.models import LevelType
 from alpha_lab.dashboard.model import CLASS_NAMES
 from alpha_lab.dashboard.model.model_manager import ModelManager
 from alpha_lab.dashboard.model.outcome_tracker import (
@@ -433,6 +434,61 @@ def compute_entry_fallback_stats(pred_rows: list[dict]) -> tuple[int, float]:
     return fallback_count, fallback_rate
 
 
+
+
+def get_population_rows(rows: list[dict], population: str) -> list[dict]:
+    """Return rows for a named analytics population."""
+    if population == "all_predictions":
+        return list(rows)
+    if population == "executable_predictions":
+        return [r for r in rows if bool(r.get("is_executable"))]
+    raise ValueError(f"Unsupported population: {population}")
+
+
+def compute_topline_expectancies(rows: list[dict]) -> dict[str, float]:
+    """Compute top-line expectancy points for each TP/SL geometry."""
+    n = len(rows)
+    if n == 0:
+        return {"15_15": 0.0, "15_25": 0.0, "15_30": 0.0}
+    return {
+        "15_15": round(sum(r.get("tp15_sl15_pnl_points", 0.0) for r in rows) / n, 6),
+        "15_25": round(sum(r.get("tp15_sl25_pnl_points", 0.0) for r in rows) / n, 6),
+        "15_30": round(sum(r.get("tp15_sl30_pnl_points", 0.0) for r in rows) / n, 6),
+    }
+
+
+def build_decision_summary(rows: list[dict], rejected_touch_rate: float, optimistic_pessimistic_delta: float, entry_fallback_count: int) -> dict[str, object]:
+    """Build compact deterministic decision summary for executable subset."""
+    top_line = compute_topline_expectancies(rows)
+    best_geom = max(top_line.items(), key=lambda kv: (kv[1], kv[0]))
+
+    level_rows = breakdown_summary(rows, ("level_type",), min_samples=1)
+    best_level = ("n/a", 0.0)
+    worst_level = ("n/a", 0.0)
+    if level_rows:
+        by_ev = sorted(
+            ((r["group_key"], float(r["expectancy_points_tp15_sl30"])) for r in level_rows),
+            key=lambda item: (item[1], item[0]),
+        )
+        worst_level = by_ev[0]
+        best_level = by_ev[-1]
+
+    confidence_rows = bucket_summary(rows)
+    confidence_ranking = [
+        {"bucket": r["confidence_bucket"], "ev_tp15_sl30": float(r["expectancy_points_tp15_sl30"])}
+        for r in sorted(confidence_rows, key=lambda r: (-float(r["expectancy_points_tp15_sl30"]), r["confidence_bucket"]))
+    ]
+
+    return {
+        "executable_prediction_count": len(rows),
+        "best_tp_sl_expectancy": {"geometry": best_geom[0].replace("_", "/"), "ev_points": float(best_geom[1])},
+        "worst_level_family_by_ev": {"level_family": worst_level[0], "ev_tp15_sl30": float(worst_level[1])},
+        "best_level_family_by_ev": {"level_family": best_level[0], "ev_tp15_sl30": float(best_level[1])},
+        "confidence_bucket_ranking_by_ev": confidence_ranking,
+        "rejected_touch_rate": float(rejected_touch_rate),
+        "optimistic_pessimistic_delta": float(optimistic_pessimistic_delta),
+        "entry_price_fallback_count": int(entry_fallback_count),
+    }
 def get_detailed_fieldnames() -> list[str]:
     """Stable detailed CSV schema used by prediction analytics export."""
     return [
@@ -459,6 +515,7 @@ def run_prediction_analytics(
     end_date: str,
     resolution_mode: Literal["optimistic", "pessimistic", "both"] = "both",
     min_breakdown_samples: int = 10,
+    disabled_level_types: set[LevelType] | None = None,
 ) -> tuple[Path, Path]:
     """Run replay and generate prediction analytics exports."""
     logging.getLogger("alpha_lab").setLevel(logging.WARNING)
@@ -470,7 +527,10 @@ def run_prediction_analytics(
     client = ReplayClient(data_dir=data_dir, start_date=start_date, end_date=end_date, speed=9999.0)
     pipeline = PipelineService(settings, client=client)
     level_engine = LevelEngine(pipeline._buffer)
-    touch_detector = TouchDetector(level_engine)
+    touch_detector = TouchDetector(
+        level_engine,
+        disabled_level_types=disabled_level_types,
+    )
     observation_manager = ObservationManager(FeatureComputer())
     prediction_engine = PredictionEngine(model_manager)
     outcome_tracker = OutcomeTracker()
@@ -746,101 +806,116 @@ def run_prediction_analytics(
 
     # summary rows
     summary_rows: list[dict] = []
+    populations = ("all_predictions", "executable_predictions")
     for mode in mode_list:
-        rows = mode_rows[mode]
-        conf, metrics, support = build_confusion_and_metrics(rows)
+        mode_base_rows = mode_rows[mode]
+        for population in populations:
+            rows = get_population_rows(mode_base_rows, population)
+            conf, metrics, _ = build_confusion_and_metrics(rows)
 
-        labels = [CLASS_NAMES[i] for i in sorted(CLASS_NAMES.keys())]
-        for actual in labels:
-            for pred_lbl in labels:
-                summary_rows.append({
-                    "section": "confusion_matrix",
-                    "mode": mode,
-                    "group": f"actual={actual}|predicted={pred_lbl}",
-                    "metric": "count",
-                    "value": conf[(actual, pred_lbl)],
-                })
+            labels = [CLASS_NAMES[i] for i in sorted(CLASS_NAMES.keys())]
+            for actual in labels:
+                for pred_lbl in labels:
+                    summary_rows.append({
+                        "section": "confusion_matrix",
+                        "mode": mode,
+                        "population": population,
+                        "group": f"actual={actual}|predicted={pred_lbl}",
+                        "metric": "count",
+                        "value": conf[(actual, pred_lbl)],
+                    })
 
-        for cls in labels:
-            m = metrics[cls]
+            for cls in labels:
+                m = metrics[cls]
+                summary_rows.extend([
+                    {"section": "class_metrics", "mode": mode, "population": population, "group": cls, "metric": "support", "value": int(m["support"])},
+                    {"section": "class_metrics", "mode": mode, "population": population, "group": cls, "metric": "precision", "value": round(m["precision"], 8)},
+                    {"section": "class_metrics", "mode": mode, "population": population, "group": cls, "metric": "recall", "value": round(m["recall"], 8)},
+                    {"section": "class_metrics", "mode": mode, "population": population, "group": cls, "metric": "accuracy_like", "value": round(m["accuracy_like"], 8)},
+                ])
+
+            tr_m = metrics.get("tradeable_reversal", {})
             summary_rows.extend([
-                {"section": "class_metrics", "mode": mode, "group": cls, "metric": "support", "value": int(m["support"])},
-                {"section": "class_metrics", "mode": mode, "group": cls, "metric": "precision", "value": round(m["precision"], 8)},
-                {"section": "class_metrics", "mode": mode, "group": cls, "metric": "recall", "value": round(m["recall"], 8)},
-                {"section": "class_metrics", "mode": mode, "group": cls, "metric": "accuracy_like", "value": round(m["accuracy_like"], 8)},
+                {"section": "tradeable_reversal_errors", "mode": mode, "population": population, "group": "tradeable_reversal", "metric": "false_positives", "value": int(tr_m.get("fp", 0.0))},
+                {"section": "tradeable_reversal_errors", "mode": mode, "population": population, "group": "tradeable_reversal", "metric": "false_negatives", "value": int(tr_m.get("fn", 0.0))},
             ])
 
-        tr_m = metrics.get("tradeable_reversal", {})
-        summary_rows.extend([
-            {"section": "tradeable_reversal_errors", "mode": mode, "group": "tradeable_reversal", "metric": "false_positives", "value": int(tr_m.get("fp", 0.0))},
-            {"section": "tradeable_reversal_errors", "mode": mode, "group": "tradeable_reversal", "metric": "false_negatives", "value": int(tr_m.get("fn", 0.0))},
-        ])
+            for b in bucket_summary(rows):
+                for metric, value in b.items():
+                    if metric == "confidence_bucket":
+                        continue
+                    summary_rows.append({
+                        "section": "confidence_buckets",
+                        "mode": mode,
+                        "population": population,
+                        "group": b["confidence_bucket"],
+                        "metric": metric,
+                        "value": value,
+                    })
 
-        for b in bucket_summary(rows):
-            for metric, value in b.items():
-                if metric == "confidence_bucket":
-                    continue
-                summary_rows.append({
-                    "section": "confidence_buckets",
-                    "mode": mode,
-                    "group": b["confidence_bucket"],
-                    "metric": metric,
-                    "value": value,
-                })
+            for row in breakdown_summary(rows, ("session",), min_samples=min_breakdown_samples):
+                for metric, value in row.items():
+                    if metric in {"session", "group_key"}:
+                        continue
+                    summary_rows.append({
+                        "section": "session_breakdown",
+                        "mode": mode,
+                        "population": population,
+                        "group": row["group_key"],
+                        "metric": metric,
+                        "value": value,
+                    })
 
-        for row in breakdown_summary(rows, ("session",), min_samples=min_breakdown_samples):
-            for metric, value in row.items():
-                if metric in {"session", "group_key"}:
-                    continue
-                summary_rows.append({
-                    "section": "session_breakdown",
-                    "mode": mode,
-                    "group": row["group_key"],
-                    "metric": metric,
-                    "value": value,
-                })
+            for row in breakdown_summary(rows, ("level_type",), min_samples=min_breakdown_samples):
+                for metric, value in row.items():
+                    if metric in {"level_type", "group_key"}:
+                        continue
+                    summary_rows.append({
+                        "section": "level_breakdown",
+                        "mode": mode,
+                        "population": population,
+                        "group": row["group_key"],
+                        "metric": metric,
+                        "value": value,
+                    })
 
-        for row in breakdown_summary(rows, ("level_type",), min_samples=min_breakdown_samples):
-            for metric, value in row.items():
-                if metric in {"level_type", "group_key"}:
-                    continue
-                summary_rows.append({
-                    "section": "level_breakdown",
-                    "mode": mode,
-                    "group": row["group_key"],
-                    "metric": metric,
-                    "value": value,
-                })
+            for row in breakdown_summary(rows, ("session", "level_type"), min_samples=min_breakdown_samples):
+                for metric, value in row.items():
+                    if metric in {"session", "level_type", "group_key"}:
+                        continue
+                    summary_rows.append({
+                        "section": "session_level_breakdown",
+                        "mode": mode,
+                        "population": population,
+                        "group": row["group_key"],
+                        "metric": metric,
+                        "value": value,
+                    })
 
-        for row in breakdown_summary(rows, ("session", "level_type"), min_samples=min_breakdown_samples):
-            for metric, value in row.items():
-                if metric in {"session", "level_type", "group_key"}:
-                    continue
-                summary_rows.append({
-                    "section": "session_level_breakdown",
-                    "mode": mode,
-                    "group": row["group_key"],
-                    "metric": metric,
-                    "value": value,
-                })
+            for row in mfe_mae_summary(rows, key=None, min_samples=1):
+                for metric, value in row.items():
+                    if metric == "group":
+                        continue
+                    summary_rows.append({"section": "mfe_mae_all", "mode": mode, "population": population, "group": row["group"], "metric": metric, "value": value})
 
-        for row in mfe_mae_summary(rows, key=None, min_samples=1):
-            for metric, value in row.items():
-                if metric == "group":
-                    continue
-                summary_rows.append({"section": "mfe_mae_all", "mode": mode, "group": row["group"], "metric": metric, "value": value})
+            for row in mfe_mae_summary(rows, key="predicted_class", min_samples=min_breakdown_samples):
+                for metric, value in row.items():
+                    if metric == "group":
+                        continue
+                    summary_rows.append({"section": "mfe_mae_by_predicted_class", "mode": mode, "population": population, "group": row["group"], "metric": metric, "value": value})
 
-        for row in mfe_mae_summary(rows, key="predicted_class", min_samples=min_breakdown_samples):
-            for metric, value in row.items():
-                if metric == "group":
-                    continue
-                summary_rows.append({"section": "mfe_mae_by_predicted_class", "mode": mode, "group": row["group"], "metric": metric, "value": value})
+            for row in mfe_mae_summary(rows, key="level_type", min_samples=min_breakdown_samples):
+                for metric, value in row.items():
+                    if metric == "group":
+                        continue
+                    summary_rows.append({"section": "mfe_mae_by_level_type", "mode": mode, "population": population, "group": row["group"], "metric": metric, "value": value})
 
-        for row in mfe_mae_summary(rows, key="level_type", min_samples=min_breakdown_samples):
-            for metric, value in row.items():
-                if metric == "group":
-                    continue
-                summary_rows.append({"section": "mfe_mae_by_level_type", "mode": mode, "group": row["group"], "metric": metric, "value": value})
+            topline_expectancy = compute_topline_expectancies(rows)
+            summary_rows.extend([
+                {"section": "topline_expectancy", "mode": mode, "population": population, "group": "all", "metric": "expectancy_points_tp15_sl15", "value": topline_expectancy["15_15"]},
+                {"section": "topline_expectancy", "mode": mode, "population": population, "group": "all", "metric": "expectancy_points_tp15_sl25", "value": topline_expectancy["15_25"]},
+                {"section": "topline_expectancy", "mode": mode, "population": population, "group": "all", "metric": "expectancy_points_tp15_sl30", "value": topline_expectancy["15_30"]},
+            ])
 
     # Observation censoring summary
     obs_stats = observation_manager.get_censoring_stats()
@@ -848,6 +923,7 @@ def run_prediction_analytics(
         summary_rows.append({
             "section": "observation_censoring_summary",
             "mode": "n/a",
+            "population": "all_predictions",
             "group": "all",
             "metric": key,
             "value": value,
@@ -863,6 +939,7 @@ def run_prediction_analytics(
         summary_rows.append({
             "section": "observation_censoring_breakdown",
             "mode": "n/a",
+            "population": "all_predictions",
             "group": group_key,
             "metric": "count",
             "value": detail["count"],
@@ -873,6 +950,7 @@ def run_prediction_analytics(
         {
             "section": "entry_price_fallback",
             "mode": "n/a",
+            "population": "all_predictions",
             "group": "all",
             "metric": "fallback_count",
             "value": fallback_count,
@@ -882,6 +960,7 @@ def run_prediction_analytics(
         {
             "section": "entry_price_fallback",
             "mode": "n/a",
+            "population": "all_predictions",
             "group": "all",
             "metric": "fallback_rate",
             "value": round(fallback_rate, 8),
@@ -898,6 +977,7 @@ def run_prediction_analytics(
         summary_rows.append({
             "section": "mode_delta",
             "mode": "optimistic_vs_pessimistic",
+            "population": "all_predictions",
             "group": "overall",
             "metric": "accuracy_like_delta_pess_minus_opt",
             "value": round(delta_acc, 8),
@@ -918,7 +998,7 @@ def run_prediction_analytics(
     detailed_fieldnames.insert(0, "resolution_mode")
     _write_csv(detailed_csv, detailed_rows, detailed_fieldnames)
 
-    summary_fieldnames = ["section", "mode", "group", "metric", "value"]
+    summary_fieldnames = ["section", "mode", "population", "group", "metric", "value"]
     _write_csv(summary_csv, summary_rows, summary_fieldnames)
 
     # Terminal summary
@@ -940,30 +1020,28 @@ def run_prediction_analytics(
         f"{fallback_count}/{len(pred_rows)} ({fallback_rate:.6f})"
     )
 
+    mode_delta = 0.0
+    if "optimistic" in mode_rows and "pessimistic" in mode_rows:
+        _, opt_metrics, _ = build_confusion_and_metrics(mode_rows["optimistic"])
+        _, pes_metrics, _ = build_confusion_and_metrics(mode_rows["pessimistic"])
+        mode_delta = pes_metrics["__overall__"]["accuracy_like"] - opt_metrics["__overall__"]["accuracy_like"]
+
     for mode in mode_list:
-        rows = mode_rows[mode]
-        conf, metrics, _ = build_confusion_and_metrics(rows)
-        labels = [CLASS_NAMES[i] for i in sorted(CLASS_NAMES.keys())]
+        all_rows = mode_rows[mode]
+        executable_rows = get_population_rows(all_rows, "executable_predictions")
+
         print("\n" + "-" * 88)
-        print(f"Confusion Matrix ({mode}) [actual x predicted]")
+        print(f"PRIMARY DECISION VIEW ({mode}) — executable predictions only")
         print("-" * 88)
-        print("actual\\pred".ljust(28) + " ".join(lbl.ljust(24) for lbl in labels))
-        for actual in labels:
-            vals = [str(conf[(actual, p)]).ljust(24) for p in labels]
-            print(actual.ljust(28) + " ".join(vals))
+        print(f"Executable prediction count: {len(executable_rows)}")
+        exec_topline = compute_topline_expectancies(executable_rows)
+        print(
+            "Executable TP/SL top-line expectancy points (per executable prediction): "
+            f"15/15={exec_topline['15_15']:.4f}, 15/25={exec_topline['15_25']:.4f}, 15/30={exec_topline['15_30']:.4f}"
+        )
 
-        print("\nPer-class metrics:")
-        for cls in labels:
-            m = metrics[cls]
-            print(
-                f"  {cls}: support={int(m['support'])}, precision={m['precision']:.4f}, "
-                f"recall={m['recall']:.4f}, accuracy_like={m['accuracy_like']:.4f}, "
-                f"fp={int(m['fp'])}, fn={int(m['fn'])}"
-            )
-        print(f"Overall accuracy_like={metrics['__overall__']['accuracy_like']:.4f}")
-
-        print("\nConfidence bucket summary (bucketed empirical calibration; not probabilistic calibration fitting):")
-        for b in bucket_summary(rows):
+        print("\nExecutable confidence bucket summary:")
+        for b in bucket_summary(executable_rows):
             print(
                 "  "
                 f"{b['confidence_bucket']}: n={b['count']}, "
@@ -974,8 +1052,8 @@ def run_prediction_analytics(
                 f"EV_pts(15/30)={b['expectancy_points_tp15_sl30']:.3f}"
             )
 
-        print("\nSession profitability summary (min samples filter applied):")
-        for row in breakdown_summary(rows, ("session",), min_samples=min_breakdown_samples):
+        print("\nExecutable level profitability summary (min samples filter applied):")
+        for row in breakdown_summary(executable_rows, ("level_type",), min_samples=min_breakdown_samples):
             print(
                 f"  {row['group_key']}: n={row['count']}, WR15/30={row['winrate_tp15_sl30']:.4f}, "
                 f"EV15/15={row['expectancy_points_tp15_sl15']:.3f}, "
@@ -983,23 +1061,48 @@ def run_prediction_analytics(
                 f"EV15/30={row['expectancy_points_tp15_sl30']:.3f}"
             )
 
-        print("\nLevel profitability summary (min samples filter applied):")
-        for row in breakdown_summary(rows, ("level_type",), min_samples=min_breakdown_samples):
+        print("\nExecutable session profitability summary (min samples filter applied):")
+        for row in breakdown_summary(executable_rows, ("session",), min_samples=min_breakdown_samples):
             print(
                 f"  {row['group_key']}: n={row['count']}, WR15/30={row['winrate_tp15_sl30']:.4f}, "
                 f"EV15/15={row['expectancy_points_tp15_sl15']:.3f}, "
                 f"EV15/25={row['expectancy_points_tp15_sl25']:.3f}, "
                 f"EV15/30={row['expectancy_points_tp15_sl30']:.3f}"
             )
+
+        session_level_rows = breakdown_summary(executable_rows, ("session", "level_type"), min_samples=min_breakdown_samples)
+        if session_level_rows:
+            print("\nExecutable session x level summary (min samples filter applied):")
+            for row in session_level_rows:
+                print(
+                    f"  {row['group_key']}: n={row['count']}, WR15/30={row['winrate_tp15_sl30']:.4f}, "
+                    f"EV15/15={row['expectancy_points_tp15_sl15']:.3f}, "
+                    f"EV15/25={row['expectancy_points_tp15_sl25']:.3f}, "
+                    f"EV15/30={row['expectancy_points_tp15_sl30']:.3f}"
+                )
+
+        print("\nAll-predictions research context (includes non-executable predictions; not the primary decision lens):")
+        conf, metrics, _ = build_confusion_and_metrics(all_rows)
+        labels = [CLASS_NAMES[i] for i in sorted(CLASS_NAMES.keys())]
+        print("  Confusion Matrix [actual x predicted]")
+        print("  " + "actual\\pred".ljust(28) + " ".join(lbl.ljust(24) for lbl in labels))
+        for actual in labels:
+            vals = [str(conf[(actual, p)]).ljust(24) for p in labels]
+            print("  " + actual.ljust(28) + " ".join(vals))
+
+        print("\n  Per-class metrics:")
+        for cls in labels:
+            m = metrics[cls]
+            print(
+                f"    {cls}: support={int(m['support'])}, precision={m['precision']:.4f}, "
+                f"recall={m['recall']:.4f}, accuracy_like={m['accuracy_like']:.4f}, "
+                f"fp={int(m['fp'])}, fn={int(m['fn'])}"
+            )
+        print(f"  Overall accuracy_like={metrics['__overall__']['accuracy_like']:.4f}")
 
     if "optimistic" in mode_rows and "pessimistic" in mode_rows:
-        _, opt_metrics, _ = build_confusion_and_metrics(mode_rows["optimistic"])
-        _, pes_metrics, _ = build_confusion_and_metrics(mode_rows["pessimistic"])
         print("\nOptimistic vs pessimistic delta summary:")
-        print(
-            "  accuracy_like delta (pess - opt) = "
-            f"{(pes_metrics['__overall__']['accuracy_like'] - opt_metrics['__overall__']['accuracy_like']):.6f}"
-        )
+        print(f"  accuracy_like delta (pess - opt) = {mode_delta:.6f}")
 
     print("\nObservation censoring summary:")
     print(
@@ -1014,14 +1117,29 @@ def run_prediction_analytics(
             f"level_type={detail['level_type']} direction={detail['direction']} count={detail['count']}"
         )
 
-    # top observations for TP/SL comparison (first selected mode for consistency)
     primary_mode = mode_list[0]
-    primary_rows = mode_rows[primary_mode]
-    ev_1515 = sum(r.get("tp15_sl15_pnl_points", 0.0) for r in primary_rows) / max(1, len(primary_rows))
-    ev_1525 = sum(r.get("tp15_sl25_pnl_points", 0.0) for r in primary_rows) / max(1, len(primary_rows))
-    ev_1530 = sum(r.get("tp15_sl30_pnl_points", 0.0) for r in primary_rows) / max(1, len(primary_rows))
-    print("\nTP/SL top-line expectancy points (per prediction):")
-    print(f"  15/15={ev_1515:.4f}, 15/25={ev_1525:.4f}, 15/30={ev_1530:.4f}")
+    primary_executable_rows = get_population_rows(mode_rows[primary_mode], "executable_predictions")
+    decision_summary = build_decision_summary(
+        rows=primary_executable_rows,
+        rejected_touch_rate=float(obs_stats["summary"].get("rejection_rate", 0.0)),
+        optimistic_pessimistic_delta=mode_delta,
+        entry_fallback_count=fallback_count,
+    )
+
+    print("\nDecision summary (executable subset, compact):")
+    print(f"  executable prediction count: {decision_summary['executable_prediction_count']}")
+    best_geom = decision_summary["best_tp_sl_expectancy"]
+    print(f"  best TP/SL expectancy: {best_geom['geometry']} ({best_geom['ev_points']:.4f})")
+    worst_level = decision_summary["worst_level_family_by_ev"]
+    best_level = decision_summary["best_level_family_by_ev"]
+    print(f"  worst level family by EV(15/30): {worst_level['level_family']} ({worst_level['ev_tp15_sl30']:.4f})")
+    print(f"  best level family by EV(15/30): {best_level['level_family']} ({best_level['ev_tp15_sl30']:.4f})")
+    print("  confidence bucket ranking by EV(15/30):")
+    for rank in decision_summary["confidence_bucket_ranking_by_ev"]:
+        print(f"    {rank['bucket']}: {rank['ev_tp15_sl30']:.4f}")
+    print(f"  rejected-touch rate: {decision_summary['rejected_touch_rate']:.6f}")
+    print(f"  optimistic/pessimistic delta: {decision_summary['optimistic_pessimistic_delta']:.6f}")
+    print(f"  entry-price fallback count: {decision_summary['entry_price_fallback_count']}")
     print("=" * 88 + "\n")
 
     return detailed_csv, summary_csv
@@ -1036,6 +1154,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default=str(_BACKEND_DIR / "analytics_results"), help="Output directory for CSVs")
     parser.add_argument("--resolution-mode", choices=["optimistic", "pessimistic", "both"], default="both")
     parser.add_argument("--min-breakdown-samples", type=int, default=10)
+    parser.add_argument(
+        "--disable-levels",
+        default="",
+        help="Comma-separated level types to disable at touch layer (e.g. pdh,pdl)",
+    )
     return parser.parse_args()
 
 
@@ -1049,6 +1172,7 @@ def main() -> None:
         end_date=args.end,
         resolution_mode=args.resolution_mode,
         min_breakdown_samples=args.min_breakdown_samples,
+        disabled_level_types=parse_disabled_level_types(args.disable_levels),
     )
 
 

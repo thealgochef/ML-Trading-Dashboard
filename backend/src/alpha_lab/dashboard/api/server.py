@@ -12,7 +12,7 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 from decimal import Decimal
 from pathlib import Path
@@ -24,9 +24,12 @@ from alpha_lab.dashboard.api.websocket import WebSocketManager
 from alpha_lab.dashboard.config.settings import DashboardSettings
 from alpha_lab.dashboard.engine.feature_computer import FeatureComputer
 from alpha_lab.dashboard.engine.level_engine import LevelEngine, _cme_day_start_utc
-from alpha_lab.dashboard.engine.models import ObservationStatus
+from alpha_lab.dashboard.engine.models import LevelType, ObservationStatus
 from alpha_lab.dashboard.engine.observation_manager import ObservationManager
-from alpha_lab.dashboard.engine.touch_detector import TouchDetector
+from alpha_lab.dashboard.engine.touch_detector import (
+    TouchDetector,
+    parse_disabled_level_types,
+)
 from alpha_lab.dashboard.model.model_manager import ModelManager
 from alpha_lab.dashboard.model.outcome_tracker import OutcomeTracker
 from alpha_lab.dashboard.model.prediction_engine import PredictionEngine
@@ -71,6 +74,7 @@ class DashboardState:
     pipeline: PipelineService | None = None
     tick_bar_builder: TickBarBuilder | None = None
     replay_mode: bool = False
+    disabled_level_types: set[LevelType] | None = None
 
     # Event loop reference for thread-safe WS broadcasting from
     # Databento's background consumer thread. Set during lifespan.
@@ -670,12 +674,20 @@ def _wire_pipeline_callbacks(
     def _broadcast_levels() -> None:
         """Build zones payload and broadcast level_update to all WS clients."""
         zones_data = []
+        disabled_level_types = state.disabled_level_types or set()
         for zone in level_engine.all_zones:
+            zone_disabled_types = sorted({
+                lv.level_type.value
+                for lv in zone.levels
+                if lv.level_type in disabled_level_types
+            })
             zones_data.append({
                 "zone_id": zone.zone_id,
                 "price": float(zone.representative_price),
                 "side": zone.side.value,
                 "is_touched": zone.is_touched,
+                "is_disabled": bool(zone_disabled_types),
+                "disabled_level_types": zone_disabled_types,
                 "levels": [
                     {
                         "type": lv.level_type.value,
@@ -829,7 +841,9 @@ def _wire_pipeline_callbacks(
 # ═══════════════════════════════════════════════════════════════════
 
 
-def _create_live_state() -> DashboardState:
+def _create_live_state(
+    disabled_level_types: set[LevelType] | None = None,
+) -> DashboardState:
     """Create a DashboardState wired to a live data pipeline.
 
     Loads settings from .env, creates PipelineService (using Databento
@@ -839,12 +853,21 @@ def _create_live_state() -> DashboardState:
     settings = DashboardSettings()
     pipeline = PipelineService(settings)
 
+    resolved_disabled_level_types = (
+        disabled_level_types
+        if disabled_level_types is not None
+        else parse_disabled_level_types(settings.disabled_levels)
+    )
+
     # Phase 1: Data + Levels
     level_engine = LevelEngine(pipeline._buffer)
 
     # Phase 2: Touch Detection + Observation
     feature_computer = FeatureComputer()
-    touch_detector = TouchDetector(level_engine)
+    touch_detector = TouchDetector(
+        level_engine,
+        disabled_level_types=resolved_disabled_level_types,
+    )
     observation_manager = ObservationManager(feature_computer)
 
     # Phase 3: Model + Prediction + Outcome Tracking
@@ -862,6 +885,7 @@ def _create_live_state() -> DashboardState:
         model_manager=model_manager,
         prediction_engine=prediction_engine,
         outcome_tracker=outcome_tracker,
+        disabled_level_types=resolved_disabled_level_types,
     )
 
     # Phase 4: Default Paper Trading Accounts
@@ -878,7 +902,9 @@ def _create_live_state() -> DashboardState:
     return state
 
 
-def create_replay_ready_state() -> DashboardState:
+def create_replay_ready_state(
+    disabled_level_types: set[LevelType] | None = None,
+) -> DashboardState:
     """Create a DashboardState for replay mode — model loaded, no pipeline.
 
     The server starts idle: model is loaded and accounts are created,
@@ -892,6 +918,7 @@ def create_replay_ready_state() -> DashboardState:
     state = DashboardState(
         model_manager=model_manager,
         replay_mode=True,
+        disabled_level_types=disabled_level_types,
     )
     _create_default_accounts(state)
     return state
@@ -978,7 +1005,10 @@ async def start_replay_pipeline(
 
     # Create fresh engine components
     level_engine = LevelEngine(pipeline._buffer)
-    touch_detector = TouchDetector(level_engine)
+    touch_detector = TouchDetector(
+        level_engine,
+        disabled_level_types=state.disabled_level_types,
+    )
     observation_manager = ObservationManager(FeatureComputer())
     prediction_engine = PredictionEngine(state.model_manager)
     outcome_tracker = OutcomeTracker()
@@ -1011,7 +1041,10 @@ async def start_replay_pipeline(
 # ═══════════════════════════════════════════════════════════════════
 
 
-def create_app(state: DashboardState | None = None) -> FastAPI:
+def create_app(
+    state: DashboardState | None = None,
+    disabled_level_types: set[LevelType] | None = None,
+) -> FastAPI:
     """Create the FastAPI application.
 
     Args:
@@ -1025,7 +1058,9 @@ def create_app(state: DashboardState | None = None) -> FastAPI:
     )
 
     if state is None:
-        state = _create_live_state()
+        state = _create_live_state(
+            disabled_level_types=disabled_level_types,
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:

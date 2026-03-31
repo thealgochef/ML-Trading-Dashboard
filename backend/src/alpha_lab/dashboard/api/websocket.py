@@ -151,13 +151,21 @@ class WebSocketManager:
         """Build an atomic snapshot of all current state for a new client."""
         # Active levels
         active_levels = []
+        disabled_level_types = state.disabled_level_types or set()
         if state.level_engine is not None:
             for zone in state.level_engine.get_active_zones():
+                zone_disabled_types = sorted({
+                    lv.level_type.value
+                    for lv in zone.levels
+                    if lv.level_type in disabled_level_types
+                })
                 active_levels.append({
                     "zone_id": zone.zone_id,
                     "price": float(zone.representative_price),
                     "side": zone.side.value,
                     "is_touched": zone.is_touched,
+                    "is_disabled": bool(zone_disabled_types),
+                    "disabled_level_types": zone_disabled_types,
                     "levels": [
                         {
                             "type": lv.level_type.value,

@@ -7,12 +7,15 @@ from decimal import Decimal
 from run_prediction_analytics import (
     PredictionRow,
     build_confusion_and_metrics,
+    build_decision_summary,
     build_detailed_rows_for_modes,
     compute_entry_fallback_stats,
+    compute_topline_expectancies,
     confidence_bucket,
     evaluate_traded_outcome,
     evaluate_traded_outcome_with_exit_ts,
     get_detailed_fieldnames,
+    get_population_rows,
     resolve_actual_class,
 )
 
@@ -299,3 +302,114 @@ def test_simulated_fields_in_detailed_fieldnames() -> None:
     fieldnames = get_detailed_fieldnames()
     assert "simulated_trade_taken" in fieldnames
     assert "simulated_blocked_reason" in fieldnames
+
+
+def test_population_rows_split_all_vs_executable() -> None:
+    rows = [
+        {"event_id": "a", "is_executable": True},
+        {"event_id": "b", "is_executable": False},
+        {"event_id": "c", "is_executable": True},
+    ]
+    all_rows = get_population_rows(rows, "all_predictions")
+    executable_rows = get_population_rows(rows, "executable_predictions")
+
+    assert len(all_rows) == 3
+    assert len(executable_rows) == 2
+    assert [r["event_id"] for r in executable_rows] == ["a", "c"]
+
+
+def test_population_rows_invalid_population_raises() -> None:
+    try:
+        get_population_rows([], "invalid_population")
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
+
+
+def test_compute_topline_expectancies_uses_population_subset() -> None:
+    all_rows = [
+        {"is_executable": True, "tp15_sl15_pnl_points": 15.0, "tp15_sl25_pnl_points": 15.0, "tp15_sl30_pnl_points": 15.0},
+        {"is_executable": False, "tp15_sl15_pnl_points": -15.0, "tp15_sl25_pnl_points": -25.0, "tp15_sl30_pnl_points": -30.0},
+    ]
+    exec_rows = get_population_rows(all_rows, "executable_predictions")
+
+    all_ev = compute_topline_expectancies(all_rows)
+    exec_ev = compute_topline_expectancies(exec_rows)
+
+    assert all_ev["15_15"] == 0.0
+    assert all_ev["15_25"] == -5.0
+    assert all_ev["15_30"] == -7.5
+    assert exec_ev["15_15"] == 15.0
+    assert exec_ev["15_25"] == 15.0
+    assert exec_ev["15_30"] == 15.0
+
+
+def test_summary_row_population_schema_and_topline_rows() -> None:
+    def emit_topline_rows(mode: str, population: str, rows: list[dict]) -> list[dict]:
+        topline = compute_topline_expectancies(rows)
+        return [
+            {"section": "topline_expectancy", "mode": mode, "population": population, "group": "all", "metric": "expectancy_points_tp15_sl15", "value": topline["15_15"]},
+            {"section": "topline_expectancy", "mode": mode, "population": population, "group": "all", "metric": "expectancy_points_tp15_sl25", "value": topline["15_25"]},
+            {"section": "topline_expectancy", "mode": mode, "population": population, "group": "all", "metric": "expectancy_points_tp15_sl30", "value": topline["15_30"]},
+        ]
+
+    base_rows = [
+        {"is_executable": True, "tp15_sl15_pnl_points": 5.0, "tp15_sl25_pnl_points": 7.0, "tp15_sl30_pnl_points": 9.0},
+        {"is_executable": False, "tp15_sl15_pnl_points": -5.0, "tp15_sl25_pnl_points": -7.0, "tp15_sl30_pnl_points": -9.0},
+    ]
+    all_rows = emit_topline_rows("optimistic", "all_predictions", get_population_rows(base_rows, "all_predictions"))
+    exec_rows = emit_topline_rows("optimistic", "executable_predictions", get_population_rows(base_rows, "executable_predictions"))
+
+    assert len(all_rows) == 3
+    assert len(exec_rows) == 3
+    assert {row["population"] for row in all_rows + exec_rows} == {"all_predictions", "executable_predictions"}
+    assert {row["metric"] for row in all_rows} == {
+        "expectancy_points_tp15_sl15",
+        "expectancy_points_tp15_sl25",
+        "expectancy_points_tp15_sl30",
+    }
+
+
+def test_build_decision_summary_is_executable_and_deterministic() -> None:
+    rows = [
+        {
+            "is_executable": True,
+            "confidence_bucket": "[0.80,0.90)",
+            "reversal_probability": 0.8,
+            "actual_class": "tradeable_reversal",
+            "level_type": "pdh",
+            "session": "ny_rth",
+            "predicted_class": "tradeable_reversal",
+            "tp15_sl15_exit_reason": "tp",
+            "tp15_sl25_exit_reason": "tp",
+            "tp15_sl30_exit_reason": "tp",
+            "tp15_sl15_pnl_points": 10.0,
+            "tp15_sl25_pnl_points": 12.0,
+            "tp15_sl30_pnl_points": 14.0,
+        },
+        {
+            "is_executable": True,
+            "confidence_bucket": "[0.50,0.60)",
+            "reversal_probability": 0.55,
+            "actual_class": "trap_reversal",
+            "level_type": "pdl",
+            "session": "asia",
+            "predicted_class": "trap_reversal",
+            "tp15_sl15_exit_reason": "sl",
+            "tp15_sl25_exit_reason": "sl",
+            "tp15_sl30_exit_reason": "sl",
+            "tp15_sl15_pnl_points": -12.0,
+            "tp15_sl25_pnl_points": -20.0,
+            "tp15_sl30_pnl_points": -25.0,
+        },
+    ]
+    summary = build_decision_summary(rows, rejected_touch_rate=0.25, optimistic_pessimistic_delta=-0.1, entry_fallback_count=3)
+
+    assert summary["executable_prediction_count"] == 2
+    assert summary["best_tp_sl_expectancy"]["geometry"] == "15/15"
+    assert summary["worst_level_family_by_ev"]["level_family"] == "pdl"
+    assert summary["best_level_family_by_ev"]["level_family"] == "pdh"
+    assert summary["confidence_bucket_ranking_by_ev"][0]["bucket"] == "[0.80,0.90)"
+    assert summary["rejected_touch_rate"] == 0.25
+    assert summary["optimistic_pessimistic_delta"] == -0.1
+    assert summary["entry_price_fallback_count"] == 3

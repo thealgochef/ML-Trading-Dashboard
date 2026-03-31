@@ -25,6 +25,8 @@ export interface LevelZone {
   price: number;
   side: LevelSide;
   is_touched: boolean;
+  is_disabled?: boolean;
+  disabled_level_types?: LevelType[];
   levels: KeyLevel[];
 }
 
