@@ -7,7 +7,15 @@ performance stats, and equity curves.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from decimal import Decimal
+from types import SimpleNamespace
+
 import pytest
+
+from alpha_lab.dashboard.pipeline.price_buffer import OHLCVBar
+from alpha_lab.dashboard.pipeline.rithmic_client import TradeUpdate
+from alpha_lab.dashboard.pipeline.tick_bar_builder import TickBarBuilder
 
 
 @pytest.mark.asyncio
@@ -87,3 +95,46 @@ async def test_get_equity_curve(async_client, app_state):
     acct_id = app_state.account_manager.get_all_accounts()[0].account_id
     resp2 = await async_client.get(f"/api/data/equity-curve?account_id={acct_id}")
     assert len(resp2.json()["snapshots"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_tick_timeframe_includes_partial_from_builder(async_client, app_state):
+    """GET /api/data/ohlcv uses TickBarBuilder include_partial for tick frames."""
+    builder = TickBarBuilder(tick_counts=[987])
+    base = datetime(2026, 3, 2, 14, 30, 0, tzinfo=UTC)
+
+    # preload one completed bar from historical backfill path
+    builder.preload_historical("987t", [
+        OHLCVBar(
+            timestamp=base,
+            open=Decimal("100.0"),
+            high=Decimal("100.0"),
+            low=Decimal("100.0"),
+            close=Decimal("100.0"),
+            volume=10,
+        )
+    ])
+
+    # add in-progress partial via trade flow
+    for i, price in enumerate([102.0, 103.0], start=1):
+        builder.on_trade(TradeUpdate(
+            timestamp=base.replace(second=base.second + i),
+            price=Decimal(str(price)),
+            size=1,
+            aggressor_side='BUY',
+            symbol='NQH6',
+        ))
+
+    # pipeline is only checked for non-None for this route branch
+    app_state.pipeline = SimpleNamespace(_buffer=None)
+    app_state.tick_bar_builder = builder
+
+    resp = await async_client.get('/api/data/ohlcv?timeframe=987t')
+    assert resp.status_code == 200
+    bars = resp.json()['bars']
+
+    assert len(bars) == 2
+    assert bars[0]['open'] == 100.0
+    assert bars[0]['close'] == 100.0
+    assert bars[1]['open'] == 102.0
+    assert bars[1]['close'] == 103.0
