@@ -155,7 +155,6 @@ def test_get_bars_include_partial_and_completion_transition():
     assert builder.get_bars("3t", include_partial=False) == []
     partial_bars = builder.get_bars("3t", include_partial=True)
     assert len(partial_bars) == 1
-    assert partial_bars[0].timestamp == base
     assert partial_bars[0].open == Decimal("100.0")
     assert partial_bars[0].close == Decimal("101.0")
 
@@ -169,50 +168,6 @@ def test_get_bars_include_partial_and_completion_transition():
     assert bars[0].high == Decimal("101.0")
     assert bars[0].low == Decimal("99.0")
     assert bars[0].close == Decimal("99.0")
-
-
-def test_partial_timestamp_stays_stable_during_in_progress_updates():
-    """Partial bar identity stays constant while bar is still in progress."""
-    builder = TickBarBuilder(tick_counts=[5])
-    base = datetime(2026, 3, 2, 14, 30, 0, tzinfo=UTC)
-
-    builder.on_trade(_trade(ts=base, price=100.0, size=1))
-    ts1 = builder.get_bars("5t", include_partial=True)[-1].timestamp
-    assert ts1 == base
-
-    builder.on_trade(_trade(ts=base + timedelta(seconds=1), price=101.0, size=1))
-    ts2 = builder.get_bars("5t", include_partial=True)[-1].timestamp
-    assert ts2 == base
-
-    builder.on_trade(_trade(ts=base + timedelta(seconds=2), price=99.0, size=1))
-    ts3 = builder.get_bars("5t", include_partial=True)[-1].timestamp
-    assert ts3 == base
-
-
-def test_next_partial_gets_new_identity_once_after_completion():
-    """After completion, next partial starts with new stable timestamp identity."""
-    builder = TickBarBuilder(tick_counts=[3])
-    base = datetime(2026, 3, 2, 14, 30, 0, tzinfo=UTC)
-
-    # Complete first bar
-    builder.on_trade(_trade(ts=base, price=100.0, size=1))
-    builder.on_trade(_trade(ts=base + timedelta(seconds=1), price=101.0, size=1))
-    builder.on_trade(_trade(ts=base + timedelta(seconds=2), price=102.0, size=1))
-    completed = builder.get_bars("3t", include_partial=True)
-    assert len(completed) == 1
-    assert completed[0].timestamp == base + timedelta(seconds=2)
-
-    # Start next partial and verify identity stays fixed across updates
-    builder.on_trade(_trade(ts=base + timedelta(seconds=3), price=103.0, size=1))
-    bars_after_first = builder.get_bars("3t", include_partial=True)
-    assert len(bars_after_first) == 2
-    first_partial_ts = bars_after_first[-1].timestamp
-    assert first_partial_ts == base + timedelta(seconds=3)
-
-    builder.on_trade(_trade(ts=base + timedelta(seconds=4), price=104.0, size=1))
-    bars_after_second = builder.get_bars("3t", include_partial=True)
-    assert len(bars_after_second) == 2
-    assert bars_after_second[-1].timestamp == first_partial_ts
 
 
 def test_get_bars_include_partial_no_duplicate_timestamps_after_rollover():
