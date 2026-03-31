@@ -141,3 +141,47 @@ def test_reset_clears_state():
     # The bar's open should come from the post-reset trades
     bar = results[0][1]
     assert bar.timestamp == base + timedelta(seconds=10) + timedelta(milliseconds=9 * 10)
+
+
+def test_get_bars_include_partial_and_completion_transition():
+    """Partial is exposed, then replaced by completed bar without duplication."""
+    builder = TickBarBuilder(tick_counts=[3])
+    base = datetime(2026, 3, 2, 14, 30, 0, tzinfo=UTC)
+
+    # 2 trades -> only partial exists when include_partial=True
+    builder.on_trade(_trade(ts=base, price=100.0, size=1))
+    builder.on_trade(_trade(ts=base + timedelta(seconds=1), price=101.0, size=1))
+
+    assert builder.get_bars("3t", include_partial=False) == []
+    partial_bars = builder.get_bars("3t", include_partial=True)
+    assert len(partial_bars) == 1
+    assert partial_bars[0].open == Decimal("100.0")
+    assert partial_bars[0].close == Decimal("101.0")
+
+    # 3rd trade completes the bar; include_partial now returns only completed bar
+    builder.on_trade(_trade(ts=base + timedelta(seconds=2), price=99.0, size=2))
+
+    bars = builder.get_bars("3t", include_partial=True)
+    assert len(bars) == 1
+    assert bars[0].timestamp == base + timedelta(seconds=2)
+    assert bars[0].open == Decimal("100.0")
+    assert bars[0].high == Decimal("101.0")
+    assert bars[0].low == Decimal("99.0")
+    assert bars[0].close == Decimal("99.0")
+
+
+def test_get_bars_include_partial_no_duplicate_timestamps_after_rollover():
+    """Completed+next partial bars have distinct timestamps."""
+    builder = TickBarBuilder(tick_counts=[2])
+    base = datetime(2026, 3, 2, 14, 30, 0, tzinfo=UTC)
+
+    # Complete first bar
+    builder.on_trade(_trade(ts=base, price=100.0, size=1))
+    builder.on_trade(_trade(ts=base + timedelta(seconds=1), price=101.0, size=1))
+
+    # Start second bar (partial)
+    builder.on_trade(_trade(ts=base + timedelta(seconds=2), price=102.0, size=1))
+
+    bars = builder.get_bars("2t", include_partial=True)
+    assert len(bars) == 2
+    assert bars[0].timestamp != bars[1].timestamp
