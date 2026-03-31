@@ -13,12 +13,16 @@ that rapid price updates get collapsed into at most 1 per interval.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
 from starlette.testclient import TestClient
 
 from alpha_lab.dashboard.api.server import DashboardState, create_app
+from alpha_lab.dashboard.engine.level_engine import LevelEngine
+from alpha_lab.dashboard.engine.models import KeyLevel, LevelSide, LevelType, LevelZone
+from alpha_lab.dashboard.pipeline.price_buffer import PriceBuffer
 from alpha_lab.dashboard.api.websocket import WebSocketManager
 from alpha_lab.dashboard.trading.account_manager import AccountManager
 from alpha_lab.dashboard.trading.position_monitor import PositionMonitor
@@ -38,6 +42,29 @@ def _make_state(throttle_interval: float = 1.0) -> DashboardState:
         trade_executor=executor,
         position_monitor=monitor,
         ws_manager=ws,
+    )
+
+
+def _zone(
+    zone_id: str,
+    level_type: LevelType,
+    price: str,
+    *,
+    touched: bool = False,
+) -> LevelZone:
+    key_level = KeyLevel(
+        level_type=level_type,
+        price=Decimal(price),
+        side=LevelSide.HIGH if level_type in {LevelType.PDH, LevelType.ASIA_HIGH, LevelType.LONDON_HIGH} else LevelSide.LOW,
+        available_from=datetime(2026, 3, 2, 0, 0, tzinfo=UTC),
+        source_session_date=date(2026, 3, 2),
+    )
+    return LevelZone(
+        zone_id=zone_id,
+        representative_price=Decimal(price),
+        levels=[key_level],
+        side=key_level.side,
+        is_touched=touched,
     )
 
 
@@ -243,3 +270,49 @@ def test_reconnect_receives_fresh_backfill():
             msg2 = ws.receive_json()
             assert msg2["type"] == "backfill"
             assert msg2["data"]["latest_price"] == 21050.0
+
+
+def test_backfill_levels_include_touched_and_disabled_zones():
+    """Backfill uses all_zones semantics and includes disabled metadata."""
+    state = _make_state()
+    level_engine = LevelEngine(PriceBuffer())
+    touched_disabled = _zone("z_touched_pdh", LevelType.PDH, "21050.0", touched=True)
+    untouched_enabled = _zone("z_active_pdl", LevelType.PDL, "20950.0", touched=False)
+    level_engine._zones = [touched_disabled, untouched_enabled]
+    state.level_engine = level_engine
+    state.disabled_level_types = {LevelType.PDH}
+
+    app = create_app(state=state)
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        msg = ws.receive_json()
+        levels = msg["data"]["active_levels"]
+
+        assert len(levels) == 2
+        by_id = {z["zone_id"]: z for z in levels}
+
+        assert by_id["z_touched_pdh"]["is_touched"] is True
+        assert by_id["z_touched_pdh"]["is_disabled"] is True
+        assert by_id["z_touched_pdh"]["disabled_level_types"] == ["pdh"]
+
+        assert by_id["z_active_pdl"]["is_touched"] is False
+        assert by_id["z_active_pdl"]["is_disabled"] is False
+        assert by_id["z_active_pdl"]["disabled_level_types"] == []
+
+
+def test_backfill_and_rest_levels_use_same_zone_payload():
+    """WebSocket backfill and GET /api/levels return the same serialized zones."""
+    state = _make_state()
+    level_engine = LevelEngine(PriceBuffer())
+    level_engine._zones = [
+        _zone("z_touched_pdh", LevelType.PDH, "21050.0", touched=True),
+        _zone("z_active_pdl", LevelType.PDL, "20950.0", touched=False),
+    ]
+    state.level_engine = level_engine
+    state.disabled_level_types = {LevelType.PDH}
+
+    app = create_app(state=state)
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        backfill_msg = ws.receive_json()
+        ws_levels = sorted(backfill_msg["data"]["active_levels"], key=lambda z: z["zone_id"])
+        rest_levels = sorted(client.get("/api/levels").json()["zones"], key=lambda z: z["zone_id"])
+        assert ws_levels == rest_levels
