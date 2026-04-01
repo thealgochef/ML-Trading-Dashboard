@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import timedelta
 from decimal import Decimal
 
 from alpha_lab.dashboard.pipeline.price_buffer import OHLCVBar
@@ -31,11 +32,13 @@ class _Accumulator:
     low: Decimal = Decimal(0)
     close: Decimal = Decimal(0)
     volume: int = 0
+    start_ts: object = None  # datetime, set on first trade in current bar
     last_ts: object = None  # datetime, set on first trade
 
     def reset(self) -> None:
         self.count = 0
         self.volume = 0
+        self.start_ts = None
         self.last_ts = None
 
 
@@ -83,9 +86,14 @@ class TickBarBuilder:
         bars = list(self._completed_bars.get(timeframe, []))
         if include_partial:
             acc = self._accumulators.get(timeframe)
-            if acc and acc.count > 0 and acc.last_ts is not None:
+            if acc and acc.count > 0 and acc.start_ts is not None:
+                partial_ts = acc.start_ts
+                # Guard rollover boundary: partial identity must not collide with
+                # the immediately previous completed bar timestamp.
+                if bars and partial_ts <= bars[-1].timestamp:
+                    partial_ts = bars[-1].timestamp + timedelta(microseconds=1)
                 bars.append(OHLCVBar(
-                    timestamp=acc.last_ts,
+                    timestamp=partial_ts,
                     open=acc.open,
                     high=acc.high,
                     low=acc.low,
@@ -106,6 +114,7 @@ class TickBarBuilder:
                 acc.open = trade.price
                 acc.high = trade.price
                 acc.low = trade.price
+                acc.start_ts = trade.timestamp
             else:
                 if trade.price > acc.high:
                     acc.high = trade.price
