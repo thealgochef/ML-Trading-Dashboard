@@ -202,7 +202,10 @@ def run_one_config(
     settings = DashboardSettings()
     account_manager = AccountManager()
     trade_executor = TradeExecutor(account_manager)
-    position_monitor = PositionMonitor(account_manager, trade_executor)
+    position_monitor = PositionMonitor(
+        account_manager, trade_executor,
+        slippage_points=Decimal(str(args.slippage)),
+    )
 
     # Set TP/SL for group A (always)
     position_monitor.set_group_tp("A", Decimal(str(tp)))
@@ -667,6 +670,12 @@ def main():
         "--compare-dd",
         action="store_true",
         help="Run intraday vs EOD trailing DD comparison (10 accounts per config)",
+    )
+    parser.add_argument(
+        "--slippage",
+        type=float,
+        default=0.50,
+        help="Slippage in NQ points per side for TP/SL exits (default: 0.50 = 2 ticks)",
     )
     parser.add_argument(
         "--disable-levels",

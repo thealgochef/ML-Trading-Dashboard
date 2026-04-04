@@ -489,6 +489,24 @@ def build_decision_summary(rows: list[dict], rejected_touch_rate: float, optimis
         "rejected_touch_rate": float(rejected_touch_rate),
         "optimistic_pessimistic_delta": float(optimistic_pessimistic_delta),
         "entry_price_fallback_count": int(entry_fallback_count),
+        "entry_vs_level_offset_stats": _offset_stats(rows),
+    }
+
+
+def _offset_stats(rows: list[dict]) -> dict[str, float]:
+    """Summary statistics for entry-vs-level price offset."""
+    offsets = [r.get("entry_vs_level_offset", 0.0) for r in rows if r.get("entry_vs_level_offset") is not None]
+    if not offsets:
+        return {"mean": 0.0, "median": 0.0, "p95_abs": 0.0, "n": 0}
+    import statistics
+    abs_offsets = [abs(o) for o in offsets]
+    abs_offsets_sorted = sorted(abs_offsets)
+    p95_idx = min(int(len(abs_offsets_sorted) * 0.95), len(abs_offsets_sorted) - 1)
+    return {
+        "mean": round(statistics.mean(offsets), 4),
+        "median": round(statistics.median(offsets), 4),
+        "p95_abs": round(abs_offsets_sorted[p95_idx], 4),
+        "n": len(offsets),
     }
 def get_detailed_fieldnames() -> list[str]:
     """Stable detailed CSV schema used by prediction analytics export."""

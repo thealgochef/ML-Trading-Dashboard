@@ -128,13 +128,15 @@ class ModelManager:
     def validate_model_contract(model: object) -> None:
         """Verify the model matches the expected 3-feature / 3-class contract.
 
-        Raises ValueError if the model's feature count or class count
-        doesn't match the dashboard contract.
+        Checks feature count, feature names (if available), and class count.
+        Raises ValueError on mismatch.
         """
+        import logging as _log
         import numpy as np
 
         from alpha_lab.dashboard.model import CLASS_NAMES, FEATURE_COLUMNS
 
+        _logger = _log.getLogger(__name__)
         expected_features = len(FEATURE_COLUMNS)
         expected_classes = len(CLASS_NAMES)
 
@@ -152,4 +154,18 @@ class ModelManager:
             raise ValueError(
                 f"Model outputs {actual_classes} classes, "
                 f"expected {expected_classes} ({list(CLASS_NAMES.values())})"
+            )
+
+        # Check feature names if the model exposes them
+        model_feature_names = getattr(model, "feature_names_", None)
+        if model_feature_names is not None:
+            if list(model_feature_names) != FEATURE_COLUMNS:
+                raise ValueError(
+                    f"Model feature names {list(model_feature_names)} do not "
+                    f"match expected {FEATURE_COLUMNS}"
+                )
+        else:
+            _logger.warning(
+                "Model has no feature_names_ attribute — cannot verify "
+                "feature name/order contract. Only count validated."
             )
