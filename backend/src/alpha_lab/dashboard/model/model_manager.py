@@ -75,8 +75,9 @@ class ModelManager:
         target["activated_at"] = datetime.now(UTC)
         self._active_id = version_id
 
-        # Load the model
+        # Load and validate the model
         self._model = self._load_from_file(target["file_path"])
+        self.validate_model_contract(self._model)
 
     def load_active_model(self) -> object | None:
         """Load and return the active model. Returns None if none active."""
@@ -122,3 +123,33 @@ class ModelManager:
         model = CatBoostClassifier()
         model.load_model(file_path)
         return model
+
+    @staticmethod
+    def validate_model_contract(model: object) -> None:
+        """Verify the model matches the expected 3-feature / 3-class contract.
+
+        Raises ValueError if the model's feature count or class count
+        doesn't match the dashboard contract.
+        """
+        import numpy as np
+
+        from alpha_lab.dashboard.model import CLASS_NAMES, FEATURE_COLUMNS
+
+        expected_features = len(FEATURE_COLUMNS)
+        expected_classes = len(CLASS_NAMES)
+
+        # Check prediction shape with a dummy input
+        dummy = np.zeros((1, expected_features))
+        try:
+            proba = model.predict_proba(dummy)
+        except Exception as exc:
+            raise ValueError(
+                f"Model failed prediction with {expected_features} features: {exc}"
+            ) from exc
+
+        actual_classes = proba.shape[1]
+        if actual_classes != expected_classes:
+            raise ValueError(
+                f"Model outputs {actual_classes} classes, "
+                f"expected {expected_classes} ({list(CLASS_NAMES.values())})"
+            )

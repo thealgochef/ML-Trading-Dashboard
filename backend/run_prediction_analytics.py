@@ -99,6 +99,7 @@ class PredictionRow:
     feature_int_time_within_2pts: float | None
     feature_int_absorption_ratio: float | None
     entry_price_at_prediction: float
+    entry_vs_level_offset: float
     entry_price_is_fallback: bool
     entry_timestamp: datetime  # actual tick timestamp when prediction fired
     is_executable: bool
@@ -497,7 +498,7 @@ def get_detailed_fieldnames() -> list[str]:
         "predicted_confidence", "reversal_probability", "confidence_bucket",
         "level_type", "level_price", "model_version",
         "feature_int_time_beyond_level", "feature_int_time_within_2pts", "feature_int_absorption_ratio",
-        "entry_price_at_prediction", "entry_price_is_fallback", "entry_timestamp",
+        "entry_price_at_prediction", "entry_vs_level_offset", "entry_price_is_fallback", "entry_timestamp",
         "is_executable", "simulated_trade_taken", "simulated_blocked_reason",
         "mfe_points", "mae_points",
         "default_actual_class", "default_resolution_type", "actual_class", "prediction_correct",
@@ -601,6 +602,7 @@ def run_prediction_analytics(
             feature_int_time_within_2pts=prediction.features.get("int_time_within_2pts"),
             feature_int_absorption_ratio=prediction.features.get("int_absorption_ratio"),
             entry_price_at_prediction=entry_price,
+            entry_vs_level_offset=entry_price - float(prediction.level_price),
             entry_price_is_fallback=entry_price_is_fallback,
             entry_timestamp=state["latest_tick_ts"],
             is_executable=prediction.is_executable,
@@ -771,6 +773,7 @@ def run_prediction_analytics(
             "feature_int_time_within_2pts": pred.feature_int_time_within_2pts,
             "feature_int_absorption_ratio": pred.feature_int_absorption_ratio,
             "entry_price_at_prediction": pred.entry_price_at_prediction,
+            "entry_vs_level_offset": round(pred.entry_vs_level_offset, 4),
             "entry_price_is_fallback": pred.entry_price_is_fallback,
             "entry_timestamp": pred.entry_timestamp.isoformat(),
             "is_executable": pred.is_executable,

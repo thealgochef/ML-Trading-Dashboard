@@ -10,8 +10,9 @@ Resolution thresholds:
 - MAE >= 37.5 pts with MFE >= 5.0 → trap_reversal (sl_hit)
 - MAE >= 37.5 pts with MFE < 5.0 → aggressive_blowthrough (sl_hit)
 
-Resolution order: MFE checked first. If both thresholds cross on the same
-tick, the favorable excursion wins (optimistic for the dashboard).
+Resolution order: MAE checked first (conservative). If both thresholds
+cross on the same tick, the adverse excursion wins. This matches the
+training label logic in experiment/labeling.py which also checks MAE first.
 """
 
 from __future__ import annotations
@@ -83,7 +84,7 @@ class OutcomeTracker:
             tracker.mfe = max(tracker.mfe, favorable)
             tracker.mae = max(tracker.mae, adverse)
 
-            # Check resolution (MFE first — spec ordering)
+            # Check resolution (MAE first — conservative, matches training labels)
             outcome = self._check_resolution(tracker, trade.timestamp)
             if outcome is not None:
                 resolved.append(outcome)
@@ -120,19 +121,20 @@ class OutcomeTracker:
     ) -> ResolvedOutcome | None:
         """Check if MFE/MAE thresholds resolve this prediction.
 
-        MFE checked first: if both thresholds cross on the same tick,
-        the favorable excursion wins.
+        MAE checked first (conservative): if both thresholds cross on the
+        same tick, the adverse excursion wins.  This matches the training
+        label logic in experiment/labeling.py.
         """
+        # SL hit (MAE >= 37.5) — check adverse first (conservative)
+        if tracker.mae >= MAE_STOP:
+            actual = "trap_reversal" if tracker.mfe >= TRAP_MFE_MIN else "aggressive_blowthrough"
+            return self._resolve(tracker, timestamp, "sl_hit", actual)
+
         # TP hit (MFE >= 25)
         if tracker.mfe >= MFE_TARGET:
             return self._resolve(
                 tracker, timestamp, "tp_hit", "tradeable_reversal",
             )
-
-        # SL hit (MAE >= 37.5)
-        if tracker.mae >= MAE_STOP:
-            actual = "trap_reversal" if tracker.mfe >= TRAP_MFE_MIN else "aggressive_blowthrough"
-            return self._resolve(tracker, timestamp, "sl_hit", actual)
 
         return None
 
@@ -172,15 +174,15 @@ class OutcomeTracker:
         timestamp: datetime,
         resolution_type: str,
     ) -> ResolvedOutcome:
-        """Force-resolve using current MFE/MAE state."""
-        if tracker.mfe >= MFE_TARGET:
-            actual = "tradeable_reversal"
-        elif tracker.mae >= MAE_STOP:
+        """Force-resolve using current MFE/MAE state (MAE-first ordering)."""
+        if tracker.mae >= MAE_STOP:
             actual = (
                 "trap_reversal"
                 if tracker.mfe >= TRAP_MFE_MIN
                 else "aggressive_blowthrough"
             )
+        elif tracker.mfe >= MFE_TARGET:
+            actual = "tradeable_reversal"
         elif tracker.mfe >= TRAP_MFE_MIN:
             actual = "trap_reversal"
         else:

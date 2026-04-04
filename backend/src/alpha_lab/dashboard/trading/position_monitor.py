@@ -45,9 +45,12 @@ class PositionMonitor:
         self,
         account_manager: AccountManager,
         trade_executor: TradeExecutor,
+        *,
+        slippage_points: Decimal = Decimal("0"),
     ) -> None:
         self._mgr = account_manager
         self._executor = trade_executor
+        self._slippage = slippage_points
 
         # Default TP/SL per group (1:1 R:R)
         self._group_tp: dict[str, Decimal] = {
@@ -124,11 +127,11 @@ class PositionMonitor:
             sl_target = sl_points * NQ_POINT_VALUE * pos.contracts
 
             if pos.unrealized_pnl >= tp_target:
-                # Exit at exact TP price, not market price
+                # Exit at TP price minus slippage (less favorable fill)
                 if pos.direction == TradeDirection.LONG:
-                    tp_exit = pos.entry_price + tp_points
+                    tp_exit = pos.entry_price + tp_points - self._slippage
                 else:
-                    tp_exit = pos.entry_price - tp_points
+                    tp_exit = pos.entry_price - tp_points + self._slippage
                 trade_result = self._executor.close_account_position(
                     acct.account_id, tp_exit, "tp", trade_ts,
                 )
@@ -140,11 +143,11 @@ class PositionMonitor:
                     )
                     closed.append(trade_result)
             elif pos.unrealized_pnl <= -sl_target:
-                # Exit at exact SL price, not market price
+                # Exit at SL price plus slippage (more adverse fill)
                 if pos.direction == TradeDirection.LONG:
-                    sl_exit = pos.entry_price - sl_points
+                    sl_exit = pos.entry_price - sl_points - self._slippage
                 else:
-                    sl_exit = pos.entry_price + sl_points
+                    sl_exit = pos.entry_price + sl_points + self._slippage
                 trade_result = self._executor.close_account_position(
                     acct.account_id, sl_exit, "sl", trade_ts,
                 )
