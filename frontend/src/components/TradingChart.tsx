@@ -144,11 +144,14 @@ export function TradingChart({ timeframe = '5m' }: TradingChartProps) {
     const datafeed = new DashboardDatafeed();
     datafeedRef.current = datafeed;
 
+    // Initial bar update handler — overwritten by timeframe-change effect
     datafeed.onBarUpdate = (bar: ChartBar, barTimeframe: string) => {
       if (barTimeframe !== timeframe) return;
-      if (bar.time >= lastBarTimeRef.current) {
+      if (bar.time >= lastBarTimeRef.current - 1) {
         series.update(bar as CandlestickData<Time>);
-        lastBarTimeRef.current = bar.time;
+        if (bar.time > lastBarTimeRef.current) {
+          lastBarTimeRef.current = bar.time;
+        }
       }
     };
 
@@ -175,12 +178,28 @@ export function TradingChart({ timeframe = '5m' }: TradingChartProps) {
     if (!series || !datafeed || !chart) return;
 
     let cancelled = false;
+    const isTick = timeframe === '147t' || timeframe === '987t' || timeframe === '2000t';
 
+    // For tick timeframes: full reload on each bar completion prevents
+    // rendering glitches from WebSocket/HTTP race conditions during fast replay.
+    // For time-based: incremental update is fine (one bar per time bucket).
     datafeed.onBarUpdate = (bar: ChartBar, barTimeframe: string) => {
       if (barTimeframe !== timeframe) return;
-      if (bar.time >= lastBarTimeRef.current) {
-        series.update(bar as CandlestickData<Time>);
-        lastBarTimeRef.current = bar.time;
+
+      if (isTick) {
+        // Full reload from backend — same as switching timeframes
+        datafeed.refreshTickBars().then((bars) => {
+          if (cancelled || bars.length === 0) return;
+          series.setData(bars as CandlestickData<Time>[]);
+          lastBarTimeRef.current = bars[bars.length - 1].time;
+        });
+      } else {
+        if (bar.time >= lastBarTimeRef.current - 1) {
+          series.update(bar as CandlestickData<Time>);
+          if (bar.time > lastBarTimeRef.current) {
+            lastBarTimeRef.current = bar.time;
+          }
+        }
       }
     };
 

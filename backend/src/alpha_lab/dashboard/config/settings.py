@@ -55,6 +55,17 @@ class DashboardSettings(BaseSettings):
     # Example: "pdh,pdl"
     disabled_levels: str | None = None
 
+    # Model inference
+    min_confidence: float = 0.70  # Min P(tradeable_reversal) to execute
+
+    # Outcome tracking thresholds (match training labels)
+    mfe_target: float = 15.0  # TP threshold for tradeable_reversal
+    mae_stop: float = 30.0  # SL threshold for trap/blowthrough
+    trap_mfe_min: float = 5.0  # Min MFE to distinguish trap from blowthrough
+
+    # Approach feature window
+    approach_window_minutes: int = 30
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="DASHBOARD_",

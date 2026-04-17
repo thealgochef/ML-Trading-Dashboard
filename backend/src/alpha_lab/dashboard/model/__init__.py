@@ -22,11 +22,22 @@ CLASS_NAMES = {
 }
 CLASS_INDEX = {v: k for k, v in CLASS_NAMES.items()}
 
-# Feature columns in canonical order (must match model training)
+# All features the dashboard can compute at runtime (MBP-1 compatible).
+# The active model may use a subset (RFECV-selected).
 FEATURE_COLUMNS = [
+    # Interaction features (post-touch observation window)
     "int_time_beyond_level",
     "int_time_within_2pts",
     "int_absorption_ratio",
+    # Approach features (pre-touch order flow window)
+    "app_large_trade_vol_pct",
+    "app_trade_count",
+    "app_volume_acceleration",
+    "app_avg_trade_size",
+    "app_avg_tob_imbalance",
+    "app_max_spread",
+    "app_volatility_recent",
+    "app_volatility_ratio",
 ]
 
 

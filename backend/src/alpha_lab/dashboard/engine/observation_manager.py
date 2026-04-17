@@ -19,6 +19,7 @@ from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
+from alpha_lab.dashboard.engine.approach_feature_computer import ApproachFeatureComputer
 from alpha_lab.dashboard.engine.feature_computer import FeatureComputer
 from alpha_lab.dashboard.engine.models import (
     ObservationStatus,
@@ -42,8 +43,17 @@ class ObservationManager:
     incoming trade (event-driven, no timers needed).
     """
 
-    def __init__(self, feature_computer: FeatureComputer) -> None:
+    def __init__(
+        self,
+        feature_computer: FeatureComputer,
+        approach_computer: ApproachFeatureComputer | None = None,
+        price_buffer=None,
+        approach_window_minutes: int = 30,
+    ) -> None:
         self._fc = feature_computer
+        self._afc = approach_computer
+        self._price_buffer = price_buffer
+        self._approach_minutes = approach_window_minutes
         self._active: ObservationWindow | None = None
         self._callbacks: list[Callable[[ObservationWindow], None]] = []
         # Additive instrumentation for observation-censoring analytics
@@ -187,6 +197,7 @@ class ObservationManager:
         window = self._active
         self._active = None
 
+        # 1. Interaction features (post-touch, 5-min window)
         features = self._fc.compute_features(
             trades=window.trades_accumulated,
             bbo_updates=window.bbo_accumulated,
@@ -195,15 +206,35 @@ class ObservationManager:
             window_start=window.start_time,
             window_end=window.end_time,
         )
+
+        # 2. Approach features (pre-touch, backward-looking)
+        if self._afc is not None and self._price_buffer is not None:
+            touch_ts = window.event.timestamp
+            approach_start = touch_ts - timedelta(minutes=self._approach_minutes)
+            approach_trades = self._price_buffer.get_trades_in_range(
+                approach_start, touch_ts,
+            )
+            approach_bbo = self._price_buffer.get_bbo_in_range(
+                approach_start, touch_ts,
+            )
+            approach_features = self._afc.compute_features(
+                trades=approach_trades,
+                bbo_updates=approach_bbo,
+                approach_start=approach_start,
+                approach_end=touch_ts,
+            )
+            features.update(approach_features)
+
         window.features = features
         window.status = ObservationStatus.COMPLETED
 
         logger.info(
-            "Observation completed: event=%s, trades_accumulated=%d, bbo_accumulated=%d, features=%s",
+            "Observation completed: event=%s, trades=%d, bbo=%d, features=%d (%s)",
             window.event.event_id[:8],
             len(window.trades_accumulated),
             len(window.bbo_accumulated),
-            {k: round(v, 4) for k, v in features.items()} if features else None,
+            len(features) if features else 0,
+            ", ".join(f"{k}={v:.4f}" for k, v in list(features.items())[:3]) if features else "none",
         )
 
         for cb in self._callbacks:

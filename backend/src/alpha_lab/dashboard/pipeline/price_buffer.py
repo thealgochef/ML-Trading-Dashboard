@@ -18,6 +18,7 @@ from alpha_lab.dashboard.pipeline.rithmic_client import BBOUpdate, TradeUpdate
 
 # Tick-bar timeframe string → tick count
 _TICK_COUNTS: dict[str, int] = {
+    "147t": 147,
     "987t": 987,
     "2000t": 2000,
 }
@@ -54,6 +55,7 @@ class PriceBuffer:
     def __init__(self, max_duration: timedelta = timedelta(hours=48)) -> None:
         self._max_duration = max_duration
         self._trades: deque[TradeUpdate] = deque()
+        self._bbo_history: deque[BBOUpdate] = deque()
         self._latest_bbo: BBOUpdate | None = None
         self._lock = threading.Lock()
 
@@ -78,6 +80,7 @@ class PriceBuffer:
     def add_bbo(self, bbo: BBOUpdate) -> None:
         with self._lock:
             self._latest_bbo = bbo
+            self._bbo_history.append(bbo)
 
     # ── Read interface ────────────────────────────────────────────
 
@@ -268,6 +271,26 @@ class PriceBuffer:
 
     # ── Maintenance ───────────────────────────────────────────────
 
+    def get_trades_in_range(
+        self, start: datetime, end: datetime,
+    ) -> list[TradeUpdate]:
+        """Return trades with timestamps in [start, end)."""
+        with self._lock:
+            return [
+                t for t in self._trades
+                if start <= t.timestamp < end
+            ]
+
+    def get_bbo_in_range(
+        self, start: datetime, end: datetime,
+    ) -> list[BBOUpdate]:
+        """Return BBO updates with timestamps in [start, end)."""
+        with self._lock:
+            return [
+                b for b in self._bbo_history
+                if start <= b.timestamp < end
+            ]
+
     def evict(self) -> None:
         """Remove data older than max_duration."""
         with self._lock:
@@ -276,6 +299,8 @@ class PriceBuffer:
             cutoff = self._trades[-1].timestamp - self._max_duration
             while self._trades and self._trades[0].timestamp < cutoff:
                 self._trades.popleft()
+            while self._bbo_history and self._bbo_history[0].timestamp < cutoff:
+                self._bbo_history.popleft()
 
 
 def _aggregate_bars(bars_1m: list[OHLCVBar], td: timedelta) -> list[OHLCVBar]:

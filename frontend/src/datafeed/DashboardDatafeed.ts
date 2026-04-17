@@ -42,7 +42,7 @@ function toChartBar(bar: BackendBar): ChartBar {
 }
 
 function isTickTimeframe(timeframe: string | null): boolean {
-  return timeframe === '987t' || timeframe === '2000t';
+  return timeframe === '147t' || timeframe === '987t' || timeframe === '2000t';
 }
 
 export type BarUpdateCallback = (bar: ChartBar, timeframe: string) => void;
@@ -162,22 +162,36 @@ export class DashboardDatafeed {
     this.onBarUpdate({ ...this.currentBar }, this.subscribedTimeframe);
   }
 
-  private async refreshTickPartialBar(): Promise<void> {
-    if (!this.onBarUpdate || !this.subscribedTimeframe) return;
-    if (!isTickTimeframe(this.subscribedTimeframe) || this.tickRefreshInFlight) return;
+  /**
+   * Full reload of tick bars from backend. During fast replay, incremental
+   * updates via WebSocket can miss bars or get out of sync. A full reload
+   * (same as switching timeframes) is the reliable path.
+   */
+  async refreshTickBars(): Promise<ChartBar[]> {
+    if (!this.subscribedTimeframe || !isTickTimeframe(this.subscribedTimeframe)) return [];
+    if (this.tickRefreshInFlight) return [];
 
     this.tickRefreshInFlight = true;
     const timeframe = this.subscribedTimeframe;
 
     try {
       const bars = await this.fetchBars(timeframe);
-      if (this.subscribedTimeframe !== timeframe || bars.length === 0) return;
-      const rightmost = bars[bars.length - 1];
-      this.onBarUpdate(rightmost, timeframe);
+      if (this.subscribedTimeframe !== timeframe) return [];
+      return bars;
     } catch (err) {
-      console.error('tick partial refresh failed', err);
+      console.error('tick bar refresh failed', err);
+      return [];
     } finally {
       this.tickRefreshInFlight = false;
+    }
+  }
+
+  /** @deprecated Use refreshTickBars + series.setData instead */
+  private async refreshTickPartialBar(): Promise<void> {
+    if (!this.onBarUpdate || !this.subscribedTimeframe) return;
+    const bars = await this.refreshTickBars();
+    if (bars.length > 0 && this.onBarUpdate) {
+      this.onBarUpdate(bars[bars.length - 1], this.subscribedTimeframe!);
     }
   }
 

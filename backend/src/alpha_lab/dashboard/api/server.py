@@ -841,18 +841,32 @@ def _create_live_state(
     level_engine = LevelEngine(pipeline._buffer)
 
     # Phase 2: Touch Detection + Observation
+    from alpha_lab.dashboard.engine.approach_feature_computer import ApproachFeatureComputer
     feature_computer = FeatureComputer()
+    approach_computer = ApproachFeatureComputer()
     touch_detector = TouchDetector(
         level_engine,
         disabled_level_types=resolved_disabled_level_types,
     )
-    observation_manager = ObservationManager(feature_computer)
+    observation_manager = ObservationManager(
+        feature_computer,
+        approach_computer=approach_computer,
+        price_buffer=pipeline._buffer,
+        approach_window_minutes=settings.approach_window_minutes,
+    )
 
     # Phase 3: Model + Prediction + Outcome Tracking
     model_manager = ModelManager(settings.model_dir)
     _auto_load_model(model_manager, settings.model_dir)
-    prediction_engine = PredictionEngine(model_manager)
-    outcome_tracker = OutcomeTracker()
+    prediction_engine = PredictionEngine(
+        model_manager,
+        min_confidence=settings.min_confidence,
+    )
+    outcome_tracker = OutcomeTracker(
+        mfe_target=settings.mfe_target,
+        mae_stop=settings.mae_stop,
+        trap_mfe_min=settings.trap_mfe_min,
+    )
 
     # Create DashboardState with all components
     state = DashboardState(
@@ -987,9 +1001,22 @@ async def start_replay_pipeline(
         level_engine,
         disabled_level_types=state.disabled_level_types,
     )
-    observation_manager = ObservationManager(FeatureComputer())
-    prediction_engine = PredictionEngine(state.model_manager)
-    outcome_tracker = OutcomeTracker()
+    from alpha_lab.dashboard.engine.approach_feature_computer import ApproachFeatureComputer
+    observation_manager = ObservationManager(
+        FeatureComputer(),
+        approach_computer=ApproachFeatureComputer(),
+        price_buffer=pipeline._buffer,
+        approach_window_minutes=settings.approach_window_minutes,
+    )
+    prediction_engine = PredictionEngine(
+        state.model_manager,
+        min_confidence=settings.min_confidence,
+    )
+    outcome_tracker = OutcomeTracker(
+        mfe_target=settings.mfe_target,
+        mae_stop=settings.mae_stop,
+        trap_mfe_min=settings.trap_mfe_min,
+    )
     tick_bar_builder = TickBarBuilder()
 
     # Update state references

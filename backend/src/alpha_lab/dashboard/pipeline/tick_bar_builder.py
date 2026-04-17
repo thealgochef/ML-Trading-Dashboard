@@ -13,8 +13,7 @@ ObservationManager.on_observation.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from datetime import timedelta
+from dataclasses import dataclass
 from decimal import Decimal
 
 from alpha_lab.dashboard.pipeline.price_buffer import OHLCVBar
@@ -59,7 +58,7 @@ class TickBarBuilder:
 
     def __init__(self, tick_counts: list[int] | None = None) -> None:
         if tick_counts is None:
-            tick_counts = [987, 2000]
+            tick_counts = [147, 987, 2000]
         self._accumulators: dict[str, _Accumulator] = {
             f"{tc}t": _Accumulator(tick_count=tc) for tc in tick_counts
         }
@@ -86,14 +85,13 @@ class TickBarBuilder:
         bars = list(self._completed_bars.get(timeframe, []))
         if include_partial:
             acc = self._accumulators.get(timeframe)
-            if acc and acc.count > 0 and acc.start_ts is not None:
-                partial_ts = acc.start_ts
-                # Guard rollover boundary: partial identity must not collide with
-                # the immediately previous completed bar timestamp.
-                if bars and partial_ts <= bars[-1].timestamp:
-                    partial_ts = bars[-1].timestamp + timedelta(microseconds=1)
+            if acc and acc.count > 0 and acc.last_ts is not None:
+                # Use last_ts (most recent trade) so the partial bar is always
+                # chronologically AFTER all completed bars. This prevents the
+                # frontend from dropping completed bars whose timestamp falls
+                # before a previously-rendered partial bar.
                 bars.append(OHLCVBar(
-                    timestamp=partial_ts,
+                    timestamp=acc.last_ts,
                     open=acc.open,
                     high=acc.high,
                     low=acc.low,

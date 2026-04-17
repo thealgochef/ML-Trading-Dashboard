@@ -5,10 +5,10 @@ For each prediction, tracks MFE (Maximum Favorable Excursion) and MAE
 (Maximum Adverse Excursion). Resolves predictions as correct or incorrect
 based on defined thresholds matching the experiment's labeling code.
 
-Resolution thresholds:
-- MFE >= 25.0 pts → tradeable_reversal (tp_hit)
-- MAE >= 37.5 pts with MFE >= 5.0 → trap_reversal (sl_hit)
-- MAE >= 37.5 pts with MFE < 5.0 → aggressive_blowthrough (sl_hit)
+Resolution thresholds (configurable, default aligned to training TP=15/SL=30):
+- MFE >= mfe_target (default 15.0) pts → tradeable_reversal (tp_hit)
+- MAE >= mae_stop (default 30.0) pts with MFE >= trap_mfe_min → trap_reversal (sl_hit)
+- MAE >= mae_stop pts with MFE < trap_mfe_min → aggressive_blowthrough (sl_hit)
 
 Resolution order: MAE checked first (conservative). If both thresholds
 cross on the same tick, the adverse excursion wins. This matches the
@@ -25,9 +25,9 @@ from alpha_lab.dashboard.engine.models import TradeDirection
 from alpha_lab.dashboard.model import Prediction, ResolvedOutcome
 from alpha_lab.dashboard.pipeline.rithmic_client import TradeUpdate
 
-# Thresholds matching experiment/labeling.py
-MFE_TARGET = 25.0
-MAE_STOP = 37.5
+# Default thresholds (aligned to Quant-Lab utility training: TP=15, SL=30)
+MFE_TARGET = 15.0
+MAE_STOP = 30.0
 TRAP_MFE_MIN = 5.0
 
 
@@ -47,7 +47,15 @@ class OutcomeTracker:
     With typically 0-3 active predictions, this is negligible load.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        mfe_target: float = MFE_TARGET,
+        mae_stop: float = MAE_STOP,
+        trap_mfe_min: float = TRAP_MFE_MIN,
+    ) -> None:
+        self._mfe_target = mfe_target
+        self._mae_stop = mae_stop
+        self._trap_mfe_min = trap_mfe_min
         self._trackers: dict[str, _ActiveTracker] = {}
         self._callbacks: list[Callable[[ResolvedOutcome], None]] = []
 
@@ -125,13 +133,13 @@ class OutcomeTracker:
         same tick, the adverse excursion wins.  This matches the training
         label logic in experiment/labeling.py.
         """
-        # SL hit (MAE >= 37.5) — check adverse first (conservative)
-        if tracker.mae >= MAE_STOP:
-            actual = "trap_reversal" if tracker.mfe >= TRAP_MFE_MIN else "aggressive_blowthrough"
+        # SL hit — check adverse first (conservative)
+        if tracker.mae >= self._mae_stop:
+            actual = "trap_reversal" if tracker.mfe >= self._trap_mfe_min else "aggressive_blowthrough"
             return self._resolve(tracker, timestamp, "sl_hit", actual)
 
-        # TP hit (MFE >= 25)
-        if tracker.mfe >= MFE_TARGET:
+        # TP hit
+        if tracker.mfe >= self._mfe_target:
             return self._resolve(
                 tracker, timestamp, "tp_hit", "tradeable_reversal",
             )
@@ -175,15 +183,15 @@ class OutcomeTracker:
         resolution_type: str,
     ) -> ResolvedOutcome:
         """Force-resolve using current MFE/MAE state (MAE-first ordering)."""
-        if tracker.mae >= MAE_STOP:
+        if tracker.mae >= self._mae_stop:
             actual = (
                 "trap_reversal"
-                if tracker.mfe >= TRAP_MFE_MIN
+                if tracker.mfe >= self._trap_mfe_min
                 else "aggressive_blowthrough"
             )
-        elif tracker.mfe >= MFE_TARGET:
+        elif tracker.mfe >= self._mfe_target:
             actual = "tradeable_reversal"
-        elif tracker.mfe >= TRAP_MFE_MIN:
+        elif tracker.mfe >= self._trap_mfe_min:
             actual = "trap_reversal"
         else:
             actual = "aggressive_blowthrough"

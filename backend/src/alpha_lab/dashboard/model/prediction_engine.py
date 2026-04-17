@@ -30,8 +30,13 @@ from alpha_lab.dashboard.model.model_manager import ModelManager
 class PredictionEngine:
     """Runs CatBoost inference on observation window features."""
 
-    def __init__(self, model_manager: ModelManager) -> None:
+    def __init__(
+        self,
+        model_manager: ModelManager,
+        min_confidence: float = 0.70,
+    ) -> None:
         self._mm = model_manager
+        self._min_confidence = min_confidence
         self._callbacks: list[Callable[[Prediction], None]] = []
 
     def predict(self, observation: ObservationWindow) -> Prediction | None:
@@ -50,10 +55,23 @@ class PredictionEngine:
             logger.info("Prediction skipped: no features computed for event=%s", observation.event.event_id[:8])
             return None
 
-        # Extract feature vector in canonical order
-        features = np.array([[
-            observation.features[col] for col in FEATURE_COLUMNS
-        ]])
+        # Extract feature vector using the model's own feature names
+        # (supports both 3-feature and 6-11 feature models)
+        model_feature_names = getattr(model, "feature_names_", None)
+        if model_feature_names is not None:
+            feature_names = list(model_feature_names)
+            # CatBoost assigns numeric names when trained without explicit names
+            # In that case, use the first N features from FEATURE_COLUMNS
+            if all(f.isdigit() for f in feature_names):
+                feature_names = list(FEATURE_COLUMNS[:len(feature_names)])
+        else:
+            feature_names = list(FEATURE_COLUMNS)
+
+        # Build feature array, using NaN for any missing features
+        feature_values = []
+        for col in feature_names:
+            feature_values.append(observation.features.get(col, float("nan")))
+        features = np.array([feature_values])
 
         # Run inference
         predicted_idx = int(model.predict(features).flat[0])
@@ -61,11 +79,13 @@ class PredictionEngine:
 
         predicted_class = CLASS_NAMES[predicted_idx]
         probabilities = {CLASS_NAMES[i]: float(p) for i, p in enumerate(proba)}
+        reversal_prob = probabilities.get("tradeable_reversal", 0.0)
 
-        # Execution eligibility: only reversals during NY RTH
+        # Execution eligibility: reversal + NY RTH + confidence threshold
         is_executable = (
             predicted_class == "tradeable_reversal"
             and observation.event.session == "ny_rth"
+            and reversal_prob >= self._min_confidence
         )
 
         logger.info(

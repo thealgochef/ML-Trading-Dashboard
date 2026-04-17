@@ -1,6 +1,7 @@
-const TIMEFRAMES = ['987t', '2000t', '1m', '5m', '15m', '1H'] as const;
+const TIMEFRAMES = ['147t', '987t', '2000t', '1m', '5m', '15m', '1H'] as const;
 
 const LABELS: Record<string, string> = {
+  '147t': '147T',
   '987t': '987T',
   '2000t': '2000T',
   '1m': '1m',

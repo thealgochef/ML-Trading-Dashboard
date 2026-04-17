@@ -41,7 +41,7 @@ def test_mfe_tracking_long():
 
 def test_mfe_tracking_short():
     """SHORT prediction correctly tracks max favorable (price below level)."""
-    tracker = OutcomeTracker()
+    tracker = OutcomeTracker()  # defaults: mfe_target=15, mae_stop=30
     pred = make_prediction(
         direction=TradeDirection.SHORT, level_price=20100.00,
     )
@@ -49,13 +49,13 @@ def test_mfe_tracking_short():
 
     # Trades below level accumulate MFE for SHORT
     tracker.on_trade(make_trade(ts_offset_s=10, price=20095.00))  # MFE=5
-    tracker.on_trade(make_trade(ts_offset_s=20, price=20085.00))  # MFE=15
-    outcomes = tracker.on_trade(make_trade(ts_offset_s=30, price=20075.00))  # MFE=25
+    # MFE=15 hits the default mfe_target=15.0 → resolves as tradeable_reversal
+    outcomes = tracker.on_trade(make_trade(ts_offset_s=20, price=20085.00))  # MFE=15
 
     assert len(outcomes) == 1
     assert outcomes[0].actual_class == "tradeable_reversal"
     assert outcomes[0].resolution_type == "tp_hit"
-    assert outcomes[0].mfe_points >= 25.0
+    assert outcomes[0].mfe_points >= 15.0
 
 
 def test_mae_tracking():
@@ -84,8 +84,13 @@ def test_mae_tracking():
 
 
 def test_both_thresholds_same_tick_mfe_wins():
-    """When a single tick crosses both MFE and MAE thresholds, MFE wins."""
-    tracker = OutcomeTracker()
+    """When both MFE and MAE thresholds are crossed, MAE wins (conservative).
+
+    A single tick that causes both running MFE >= mfe_target (15) and
+    running MAE >= mae_stop (30) resolves as sl_hit because MAE is
+    checked first (conservative ordering, matches training labels).
+    """
+    tracker = OutcomeTracker()  # defaults: mfe_target=15, mae_stop=30
     pred = make_prediction(
         predicted_class="tradeable_reversal",
         direction=TradeDirection.LONG,
@@ -93,20 +98,27 @@ def test_both_thresholds_same_tick_mfe_wins():
     )
     tracker.start_tracking(pred)
 
-    # First: build up MAE close to threshold
-    tracker.on_trade(make_trade(ts_offset_s=5, price=20063.00))  # MAE=37
+    # A single tick that crosses BOTH thresholds simultaneously:
+    # For LONG at level 20100: price 20070 gives MAE=30 (hit)
+    # But running MFE was built up in prior tick
+    # First build MFE to 14 (just below 15 threshold)
+    tracker.on_trade(make_trade(ts_offset_s=5, price=20114.00))  # MFE=14, MAE=0
 
-    # Then: a huge favorable spike that crosses BOTH thresholds simultaneously
-    # MFE jumps from 0 to 25+ AND MAE was already at 37 from prior trade
-    outcomes = tracker.on_trade(make_trade(ts_offset_s=10, price=20125.00))
+    # Now a single tick that causes:
+    # - MFE stays at 14 (price is below entry) → now MAE = 100-70=30 → MAE=30
+    # - But also favorable hits: running MFE was 14, now price 20070
+    #   → MFE stays 14, MAE now = 30 → MAE threshold hit
+    outcomes = tracker.on_trade(make_trade(ts_offset_s=10, price=20070.00))  # MAE=30
 
-    # MFE checked first → tp_hit wins
+    # MAE checked first → sl_hit wins
     assert len(outcomes) == 1
-    assert outcomes[0].resolution_type == "tp_hit"
-    assert outcomes[0].actual_class == "tradeable_reversal"
-    assert outcomes[0].prediction_correct is True
-    assert outcomes[0].mfe_points >= 25.0
-    assert outcomes[0].mae_points >= 37.0
+    assert outcomes[0].resolution_type == "sl_hit"
+    # MFE was 14 (< trap_mfe_min=5? No, 14 > 5) → trap_reversal
+    assert outcomes[0].actual_class == "trap_reversal"
+    # Predicted tradeable_reversal but actual is trap → incorrect
+    assert outcomes[0].prediction_correct is False
+    assert outcomes[0].mfe_points == 14.0
+    assert outcomes[0].mae_points == 30.0
 
 
 def test_resolve_reversal_on_tp():

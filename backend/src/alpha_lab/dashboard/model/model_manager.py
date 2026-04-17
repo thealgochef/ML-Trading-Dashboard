@@ -126,10 +126,10 @@ class ModelManager:
 
     @staticmethod
     def validate_model_contract(model: object) -> None:
-        """Verify the model matches the expected 3-feature / 3-class contract.
+        """Verify the model uses a valid subset of dashboard-computable features.
 
-        Checks feature count, feature names (if available), and class count.
-        Raises ValueError on mismatch.
+        Checks that all model features are in FEATURE_COLUMNS (subset ok),
+        and that the model outputs exactly 3 classes.
         """
         import logging as _log
         import numpy as np
@@ -137,16 +137,53 @@ class ModelManager:
         from alpha_lab.dashboard.model import CLASS_NAMES, FEATURE_COLUMNS
 
         _logger = _log.getLogger(__name__)
-        expected_features = len(FEATURE_COLUMNS)
         expected_classes = len(CLASS_NAMES)
+        allowed_features = set(FEATURE_COLUMNS)
 
-        # Check prediction shape with a dummy input
-        dummy = np.zeros((1, expected_features))
+        # Determine model feature count from feature_names_ or try progressively
+        model_feature_names = getattr(model, "feature_names_", None)
+
+        if model_feature_names is not None:
+            model_features = list(model_feature_names)
+            n_features = len(model_features)
+
+            # CatBoost assigns numeric names ('0', '1', '2') when trained
+            # without explicit feature names — treat as unnamed
+            is_numeric_default = all(f.isdigit() for f in model_features)
+
+            if not is_numeric_default:
+                # Verify all model features are in the allowed set
+                unknown = [f for f in model_features if f not in allowed_features]
+                if unknown:
+                    raise ValueError(
+                        f"Model uses features not computable by dashboard: {unknown}. "
+                        f"Allowed: {FEATURE_COLUMNS}"
+                    )
+                _logger.info(
+                    "Model contract: %d named features (%s), validating...",
+                    n_features, ", ".join(model_features),
+                )
+            else:
+                _logger.warning(
+                    "Model has numeric feature names (%d features) — "
+                    "cannot verify feature name contract. Only count validated.",
+                    n_features,
+                )
+        else:
+            # No feature names — try with max feature count
+            n_features = len(FEATURE_COLUMNS)
+            _logger.warning(
+                "Model has no feature_names_ — trying with %d features",
+                n_features,
+            )
+
+        # Check prediction shape with dummy input
+        dummy = np.zeros((1, n_features))
         try:
             proba = model.predict_proba(dummy)
         except Exception as exc:
             raise ValueError(
-                f"Model failed prediction with {expected_features} features: {exc}"
+                f"Model failed prediction with {n_features} features: {exc}"
             ) from exc
 
         actual_classes = proba.shape[1]
@@ -155,15 +192,6 @@ class ModelManager:
                 f"Model outputs {actual_classes} classes, "
                 f"expected {expected_classes} ({list(CLASS_NAMES.values())})"
             )
-
-        # Check feature names if the model exposes them
-        model_feature_names = getattr(model, "feature_names_", None)
-        if model_feature_names is not None:
-            if list(model_feature_names) != FEATURE_COLUMNS:
-                raise ValueError(
-                    f"Model feature names {list(model_feature_names)} do not "
-                    f"match expected {FEATURE_COLUMNS}"
-                )
         else:
             _logger.warning(
                 "Model has no feature_names_ attribute — cannot verify "
